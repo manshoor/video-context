@@ -1,0 +1,31 @@
+.build/
+.swiftpm/
+dist/
+.DS_Store
+
+# Local libraries, recordings, credentials, and signing material
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.mp4
+*.mov
+*.webm
+*.m4a
+*.wav
+*.mp3
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Machine-local agent installations
+/.agents/
+/.claude/
+/.codex/
+/.hermes/
+/.pi/
+/skills-lock.json
