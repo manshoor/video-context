@@ -30,12 +30,12 @@ struct TaskConsolidationTests {
         }
         #expect(throws: (any Error).self) { try TaskConsolidation.merge(.init(groups: [.init(members: [0, 1], questions: [])]), candidates: input) }
     }
-    @Test(arguments: [AnalysisProvider.lmStudio, .openAI])
+    @Test(arguments: AnalysisProvider.allCases)
     func adapterRequestsOnlyGroupingAndBlockingQuestions(provider: AnalysisProvider) throws {
-        let request = try TaskConsolidation.request(candidates: candidates(), configuration: .init(analysisProvider: provider, lmStudio: .init(modelID: "vision")), credential: "mock")
+        let request = try TaskConsolidation.request(candidates: candidates(), configuration: .init(analysisProvider: provider, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash"), credential: "mock")
         let payload = try #require(try JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
         let body = String(decoding: request.httpBody!, as: UTF8.self)
-        #expect(body.contains("video_context_task_groups")); #expect(body.contains("draft_0")); #expect(body.contains("contradict"))
+        if provider == .openAI || provider == .lmStudio { #expect(body.contains("video_context_task_groups")) }; #expect(body.contains("draft_0")); #expect(body.contains("contradict"))
         #expect(!body.contains("api.openai.com"))
         if provider == .lmStudio { #expect(payload["reasoning_effort"] as? String == "none") }
     }
@@ -43,7 +43,7 @@ struct TaskConsolidationTests {
         let (_, store, snapshot, _) = try await TaskGenerationTests().fixture()
         let result = #"{"assignments":{"draft_0":{"group":0,"questions":["Which label is intended?"]},"draft_1":{"group":0,"questions":[]}}}"#
         let client = TaskTestHTTP([try TaskGenerationTests.result(result)])
-        let generator = TaskGenerator(client: client, configuration: .init(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision")), credential: "")
+        let generator = TaskGenerator(client: client, configuration: .init(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash"), credential: "")
         for _ in 0..<2 {
             let output = try await generator.consolidate(candidates(), snapshot: snapshot, store: store, progress: nil)
             #expect(output.count == 1); #expect(output[0].checks.count == 2)
@@ -54,15 +54,15 @@ struct TaskConsolidationTests {
     @Test func consolidationOverflowPreservesEveryDraftAndRequiresBoundaryReview() async throws {
         let (_, store, snapshot, _) = try await TaskGenerationTests().fixture()
         let client = TaskTestHTTP([.init(data: Data(#"{"error":{"message":"context length exceeded"}}"#.utf8), statusCode: 400)])
-        let output = try await TaskGenerator(client: client, configuration: .init(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision")), credential: "").consolidate(candidates(), snapshot: snapshot, store: store, progress: nil)
+        let output = try await TaskGenerator(client: client, configuration: .init(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash"), credential: "").consolidate(candidates(), snapshot: snapshot, store: store, progress: nil)
         #expect(output.count == 2)
         #expect(output.allSatisfy { $0.content.questions.contains { $0.unresolved && $0.question.contains("bounded batch") } })
         #expect(await client.requests.count == 1)
     }
-    @Test(arguments: [AnalysisProvider.lmStudio, .openAI])
+    @Test(arguments: AnalysisProvider.allCases)
     func incompleteConsolidationDoesNotPublishAndRetryReusesExtraction(provider: AnalysisProvider) async throws {
         let (paths, store, snapshot, brief) = try await TaskGenerationTests().fixture()
-        let config = ModelConfiguration(analysisProvider: provider, lmStudio: .init(modelID: "vision"))
+        let config = ModelConfiguration(analysisProvider: provider, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash")
         let first = TaskTestHTTP([
             try TaskGenerationTests.result(TaskGenerationTests.taskJSON, provider: provider),
             try TaskGenerationTests.result(TaskGenerationTests.taskJSON.replacingOccurrences(of: "Save label", with: "Update Save button"), provider: provider),

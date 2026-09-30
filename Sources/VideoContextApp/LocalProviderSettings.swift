@@ -17,24 +17,29 @@ extension AppModel {
         speechModelMessage = "Downloading Whisper Large v3 Turbo…"
         speechDownloadTask = Task { [weak self] in
             guard let owner = self else { return }
-            do {
-                try await speechModels.download { fraction in
-                    Task { @MainActor [weak owner] in
-                        guard let owner, owner.speechDownloadActive, owner.speechDownloadID == downloadID else { return }
-                        owner.speechDownloadFraction = fraction
+            await owner.runDiagnosed(.speechModel) {
+                do {
+                    try await speechModels.download { [weak owner] fraction in
+                        Task { @MainActor [weak owner] in
+                            guard let owner, owner.speechDownloadActive, owner.speechDownloadID == downloadID else { return }
+                            owner.speechDownloadFraction = fraction
+                        }
                     }
+                    try Task.checkCancellation()
+                    await self?.refreshSpeechModelStatus()
+                    await DiagnosticTrace.record(.completed)
+                } catch is CancellationError {
+                    await DiagnosticTrace.record(.cancelled)
+                    self?.speechModelMessage = "Speech model download stopped. Download again to finish setup."
+                } catch {
+                    await DiagnosticTrace.record(.failed, error: error)
+                    self?.speechModelMessage = "Speech model download failed: \(error.localizedDescription)"
                 }
-                try Task.checkCancellation()
-                await self?.refreshSpeechModelStatus()
-            } catch is CancellationError {
-                self?.speechModelMessage = "Speech model download stopped. Download again to finish setup."
-            } catch {
-                self?.speechModelMessage = "Speech model download failed: \(error.localizedDescription)"
+                self?.speechDownloadID = nil
+                self?.speechDownloadActive = false
+                self?.speechDownloadFraction = nil
+                self?.speechDownloadTask = nil
             }
-            self?.speechDownloadID = nil
-            self?.speechDownloadActive = false
-            self?.speechDownloadFraction = nil
-            self?.speechDownloadTask = nil
         }
     }
 
@@ -62,7 +67,7 @@ extension AppModel {
     }
 
     func loadLocalToken(mode: APIKeyAccessMode) async {
-        guard !isUIFixture else { return }
+        guard !isUIFixture, !localTokenEdited else { return }
         localTokenRequestID += 1
         let id = localTokenRequestID
         lmTokenState = .loading
@@ -75,12 +80,13 @@ extension AppModel {
         }
         defer { timeout.cancel() }
         do {
-            let token = try await localTokenStore.load(mode: mode)
+            let token = try await SavedCredentialLookup.load(from: localTokenStore, mode: mode)
             guard id == localTokenRequestID, !Task.isCancelled else { return }
             lmStudioToken = token ?? ""
             lmTokenState = lmStudioToken.isEmpty ? .missing : .ready
             if lmTokenState == .ready { resumeFirstIncompleteRecording() }
         } catch {
+            await recordDiagnosticFailure(error, operation: .credentials)
             guard id == localTokenRequestID else { return }
             lmTokenState = .accessRequired
         }
@@ -89,13 +95,13 @@ extension AppModel {
     func startLocalModelCheck(testImage: Bool) {
         guard localCheckTask == nil else { return }
         localCheckTask = Task { [weak self] in
-            await self?.checkLocalModel(testImage: testImage)
+            await self?.runDiagnosed(.modelCheck) { await self?.checkLocalModel(testImage: testImage) }
             self?.localCheckTask = nil
         }
     }
 
     func checkLocalModel(testImage: Bool) async {
-        guard !checkingLocalModel, !isUIFixture else { return }
+        guard !isProcessing, !checkingLocalModel, !isUIFixture else { return }
         let configuration = modelConfiguration.lmStudio
         let token = lmStudioUsesToken ? lmStudioToken : ""
         guard !lmStudioUsesToken || !token.isEmpty else {
@@ -119,16 +125,23 @@ extension AppModel {
                 }
                 let request = try LMStudioRequestBuilder.analysis(configuration: loaded, token: token,
                     prompt: "Read the code printed in this image. Return only that code in the markdown field.", images: [Data(contentsOf: imageURL)], maxTokens: 2_048)
-                let result = try await transport.data(for: request)
-                try LMStudioResponseDecoder.validate(result)
-                let markdown = try LMStudioResponseDecoder.markdown(result.data)
-                guard markdown.contains("VC-TEST-42") else { throw LocalProviderError.configuration("The model returned JSON but did not read the test image correctly. Try another vision model.") }
+                var usageConfiguration = modelConfiguration
+                usageConfiguration.analysisProvider = .lmStudio; usageConfiguration.lmStudio = configuration
+                try await withUsageRun(operation: .modelTest, videoID: nil, configuration: usageConfiguration) {
+                    let tracked = UsageRecordingClient(base: transport, provider: .lmStudio, model: configuration.modelID, stage: .modelTest)
+                    let result = try await tracked.data(for: request)
+                    try LMStudioResponseDecoder.validate(result)
+                    let markdown = try LMStudioResponseDecoder.markdown(result.data)
+                    guard markdown.contains("VC-TEST-42") else { throw LocalProviderError.configuration("The model returned JSON but did not read the test image correctly. Try another vision model.") }
+                }
                 guard configuration == modelConfiguration.lmStudio else { localConnectionMessage = "Settings changed. Test the selected model again."; return }
                 localConnectionMessage = "Image input and structured output passed · \(instance.config.contextLength.formatted()) token context."
             } else {
                 localConnectionMessage = localModels.isEmpty ? "No vision models found. Download and load Qwen3.8 27B or Gemma 4 12B QAT in LM Studio." : "Found \(localModels.count) vision models. Select a loaded model, then test it."
             }
+            await DiagnosticTrace.record(.completed)
         } catch {
+            await DiagnosticTrace.record(Task.isCancelled ? .cancelled : .failed, error: error)
             if Task.isCancelled { localConnectionMessage = "Model check cancelled." }
             else if configuration == modelConfiguration.lmStudio { localConnectionMessage = error.localizedDescription }
         }

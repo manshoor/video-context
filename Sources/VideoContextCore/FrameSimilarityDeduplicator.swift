@@ -17,7 +17,13 @@ public struct FrameSimilarityDeduplicator: Sendable {
     ) async -> [CapturedFrame] {
         var kept: [(frame: CapturedFrame, feature: VNFeaturePrintObservation?)] = []
         for frame in frames.sorted(by: { $0.timestamp < $1.timestamp }) {
-            let protected = transcriptCueTimestamps.contains { abs($0 - frame.timestamp) <= cueTolerance }
+            // New captures retain both values. Prefer the requested timestamp
+            // for matching transcript cues, then fall back to measured PTS so
+            // legacy captures and providers without requested metadata remain
+            // protected as well.
+            let protected = transcriptCueTimestamps.contains {
+                abs($0 - frame.requestedTimestamp) <= cueTolerance || abs($0 - frame.timestamp) <= cueTolerance
+            }
             let feature = try? featurePrint(for: frame.url)
             let duplicatesPriorFrame = feature.map { candidate in
                 kept.contains { prior in

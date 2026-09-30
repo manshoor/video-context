@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import VideoContextCore
 import WhisperKit
 
@@ -54,6 +55,10 @@ actor LocalWhisperTranscriber: Transcribing {
     func transcribe(audioURL: URL, videoID: String, chunkStart: TimeInterval) async throws -> [TranscriptSegment] {
         try Task.checkCancellation()
         if kit == nil {
+            if let scope = DiagnosticTrace.scope {
+                await scope.service.record(.init(.preparingModel, operation: scope.operation, operationID: scope.id,
+                    context: .init(videoID: videoID, provider: .localWhisper, model: ModelConfiguration.localSpeechModel), stage: .transcribing))
+            }
             await progress?(.init(stage: .transcribing, detail: "Preparing speech model"))
             // Load the tokenizer using the local-only factory. WhisperKit's convenience loader
             // otherwise falls back to a network download when a local tokenizer is corrupt.
@@ -71,6 +76,16 @@ actor LocalWhisperTranscriber: Transcribing {
             await progress?(.init(stage: .transcribing, detail: "Transcribing locally"))
         }
         guard let kit else { throw LocalProviderError.configuration("The local speech model could not be loaded.") }
+        let duration = try? await AVURLAsset(url: audioURL).load(.duration)
+        let audioSeconds = duration.map(\.seconds).flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        var usageAttempt: UsageAttempt?
+        if let session = UsageTrace.session {
+            let attempt = UsageAttempt(runID: session.runID, stage: .transcription, provider: .localWhisper, requestedModel: ModelConfiguration.localSpeechModel)
+            do { try await session.store.saveUsageAttempt(attempt); usageAttempt = attempt }
+            catch { await session.markStorageFailure(); throw error }
+            await session.notify()
+        }
+        do {
         let results = try await kit.transcribe(audioPath: audioURL.path,
             decodeOptions: DecodingOptions(task: .transcribe, detectLanguage: true, skipSpecialTokens: true,
                 withoutTimestamps: false, concurrentWorkerCount: 1),
@@ -79,10 +94,25 @@ actor LocalWhisperTranscriber: Transcribing {
         let segments = results.flatMap(\.segments).filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.map {
             TranscriptSegment(videoID: videoID, start: chunkStart + Double($0.start), end: chunkStart + Double($0.end), originalText: $0.text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        try await store?.recordAPIUsage(APIUsageRecord(videoID: videoID, stage: .transcription,
-            model: ModelConfiguration.localSpeechModel, provider: .localWhisper,
-            audioSeconds: results.flatMap(\.segments).map { Double($0.end) }.max()))
+        if let session = UsageTrace.session, var attempt = usageAttempt {
+            attempt.outcome = .completed; attempt.finishedAt = .now
+            attempt.tokens.audioSeconds = audioSeconds
+            do { try await session.store.saveUsageAttempt(attempt) } catch { await session.markStorageFailure() }
+            await session.notify()
+        } else {
+            try await store?.recordAPIUsage(APIUsageRecord(videoID: videoID, stage: .transcription,
+                model: ModelConfiguration.localSpeechModel, provider: .localWhisper,
+                audioSeconds: audioSeconds))
+        }
         return segments
+        } catch {
+            if let session = UsageTrace.session, var attempt = usageAttempt {
+                attempt.outcome = Task.isCancelled || error is CancellationError ? .cancelled : .failed; attempt.finishedAt = .now
+                do { try await session.store.saveUsageAttempt(attempt) } catch { await session.markStorageFailure() }
+                await session.notify()
+            }
+            throw error
+        }
     }
 
     func releaseResources() async {

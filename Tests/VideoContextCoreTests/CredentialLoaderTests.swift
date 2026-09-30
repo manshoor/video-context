@@ -31,6 +31,14 @@ struct CredentialLoaderTests {
         #expect(queries[1][kSecUseAuthenticationUI as String] as? String == kSecUseAuthenticationUIFail as String)
     }
 
+    @Test("A temporarily missing saved key is retried without user interaction")
+    func transientMissingKeyRecoversAutomatically() async {
+        let store = TemporarilyMissingCredential()
+        let result = await CredentialLoader(store: store).load(mode: .nonInteractive)
+        #expect(result == .ready("saved-fixture-key"))
+        #expect(await store.modes == [.nonInteractive, .nonInteractive])
+    }
+
     @Test("An untouched empty API key does not remove the stored credential")
     func untouchedEmptyKeyDoesNothing() {
         #expect(CredentialSaveAction.resolve(value: "", wasEdited: false) == .none)
@@ -101,4 +109,14 @@ private actor DeferredAPIKeyStore: APIKeyStoring {
         continuation?.resume(returning: key)
         continuation = nil
     }
+}
+
+private actor TemporarilyMissingCredential: APIKeyStoring {
+    private(set) var modes: [APIKeyAccessMode] = []
+    func load(mode: APIKeyAccessMode) async throws -> String? {
+        modes.append(mode)
+        return modes.count == 1 ? nil : "saved-fixture-key"
+    }
+    func save(_ key: String) async throws {}
+    func remove() async throws {}
 }

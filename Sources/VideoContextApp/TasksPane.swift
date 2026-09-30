@@ -11,15 +11,8 @@ private struct TaskEditorPresentation: Identifiable {
 struct BriefTasksPane: View {
     @Bindable var model: AppModel
     let snapshot: VideoSnapshot
-    @State private var tab = CommandLine.arguments.contains("--ui-tasks") ? "Tasks" : "Brief"
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Context view", selection: $tab) {
-                Text("Brief").tag("Brief"); Text("Tasks").tag("Tasks")
-            }.pickerStyle(.segmented).padding(10)
-            if tab == "Brief" { BriefPane(model: model, videoID: snapshot.video.id, brief: snapshot.brief) }
-            else { TasksPane(model: model, videoID: snapshot.video.id) }
-        }
+        BriefPane(model: model, videoID: snapshot.video.id, brief: snapshot.brief)
     }
 }
 
@@ -34,6 +27,7 @@ struct TasksPane: View {
     @State private var showArchived = false
     private var library: TaskLibrarySnapshot? { model.taskLibrary?.video.id == videoID ? model.taskLibrary : nil }
     var body: some View {
+        let filtered = TaskPaneFilter(tasks: library?.tasks ?? [], proposals: library?.proposals ?? [], showQuestions: showQuestions, showArchived: showArchived)
         VStack(alignment: .leading, spacing: 8) {
             ViewThatFits(in: .horizontal) {
                 HStack { generationButton; addButton; copyButton }
@@ -43,22 +37,38 @@ struct TasksPane: View {
             if let message = model.taskGenerationMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
             HStack {
                 Toggle("Open questions", isOn: $showQuestions).toggleStyle(.button)
+                    .help("Show unanswered questions in generated proposals and saved tasks")
                 Toggle("Archived", isOn: $showArchived).toggleStyle(.button)
             }.font(.caption)
+            if showQuestions {
+                Text(showArchived ? "Unanswered questions in archived tasks." : "Unanswered questions in generated proposals and saved tasks.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     if let library {
-                        if library.tasks.isEmpty && library.proposals.isEmpty {
+                        if filtered.tasks.isEmpty && filtered.proposals.isEmpty && showQuestions {
+                            ContentUnavailableView("No open questions", systemImage: "checkmark.bubble", description: Text(showArchived ? "No archived tasks have unanswered questions." : "No generated proposals or active tasks have unanswered questions. Turn off Open questions to see all items."))
+                        } else if filtered.tasks.isEmpty && filtered.proposals.isEmpty && showArchived {
+                            ContentUnavailableView("No archived tasks", systemImage: "archivebox", description: Text("Turn off Archived to see active tasks and proposals."))
+                        } else if library.tasks.isEmpty && library.proposals.isEmpty {
                             ContentUnavailableView("Turn this recording into tasks", systemImage: "checklist", description: Text("Generate task proposals or add a task. Review requirements and evidence before an implementation handoff."))
                         }
-                        ForEach(library.proposals) { item in
-                            Button { proposal = item } label: {
-                                Label("\(item.kind == .addition ? "Add" : item.kind == .archive ? "Archive" : "Update"): \(item.content?.title ?? library.tasks.first(where: { $0.id == item.taskID })?.content.title ?? "Task")", systemImage: "doc.badge.gearshape")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }.buttonStyle(.bordered).help("Review proposed changes before applying")
+                        ForEach(filtered.proposals) { item in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Button { proposal = item } label: {
+                                    Label("\(item.kind == .addition ? "Add" : item.kind == .archive ? "Archive" : "Update"): \(item.content?.title ?? library.tasks.first(where: { $0.id == item.taskID })?.content.title ?? "Task")", systemImage: "doc.badge.gearshape")
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }.buttonStyle(.bordered).help("Review proposed changes before applying")
+                                if showQuestions {
+                                    questions(in: item.content)
+                                    Text(item.kind == .addition ? "Accept this proposal with Add task, then use Edit to answer its questions." : "Apply this proposal, then use Edit on the saved task to answer its questions.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
                         }
-                        ForEach(library.tasks.filter { ($0.archived == showArchived) && (!showQuestions || $0.content.questions.contains(where: { $0.answer.isEmpty })) }) { task in
+                        ForEach(filtered.tasks) { task in
                             card(task, library: library)
                         }
                     }
@@ -73,6 +83,18 @@ struct TasksPane: View {
         }
         .sheet(isPresented: $showHandoff) { if let library { TaskHandoffSheet(model: model, snapshot: library, selected: selected) } }
         .onChange(of: videoID) { _, _ in selected = []; editor = nil; proposal = nil }
+    }
+    private func questions(in content: TaskContent?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(TaskPaneFilter.openQuestions(in: content)) { question in
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(question.question, systemImage: "questionmark.circle")
+                        .font(.callout).textSelection(.enabled)
+                    Text(question.unresolved ? "Unresolved blocker" : "Non-blocking · \(question.nonBlockingReason)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
     }
     private var generationButton: some View {
         Button("Generate tasks", systemImage: "sparkles") { model.generateTasks() }
@@ -100,13 +122,12 @@ struct TasksPane: View {
                 Button("Edit", systemImage: "pencil") { editor = TaskEditorPresentation(task: task, source: library.video.revisions, isNew: false) }.labelStyle(.iconOnly).help("Edit task, questions, checks and annotations")
             }
             Text("\(task.state(library.video)) · r\(task.revision) · \(task.content.checks.count) acceptance checks").font(.caption).foregroundStyle(.secondary)
+            TaskOriginBadge(origin: task.generatedOriginal == nil ? .request : .recording)
             if task.content.blockers > 0 { Label("\(task.content.blockers) unresolved blockers", systemImage: "questionmark.circle").font(.caption).foregroundStyle(.orange) }
             if task.generatedOriginal != nil && task.generatedOriginal != task.content { Label("User edited", systemImage: "pencil").font(.caption) }
             Text(task.content.behavior).font(.callout).lineLimit(3)
             if showQuestions {
-                ForEach(task.content.questions.filter { $0.answer.isEmpty }) { question in
-                    Text("• \(question.question)").font(.callout)
-                }
+                questions(in: task.content)
             }
             HStack {
                 Button("Review", systemImage: "checkmark.seal") { editor = TaskEditorPresentation(task: task, source: library.video.revisions, isNew: false) }.disabled(task.archived)

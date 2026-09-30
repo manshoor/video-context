@@ -31,7 +31,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "VideoContextApp",
-            dependencies: ["VideoContextCore", .product(name: "WhisperKit", package: "argmax-oss-swift")],
+            dependencies: [
+                "VideoContextCore",
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
+                .product(name: "MCP", package: "swift-sdk")
+            ],
             resources: [.copy("Resources/ModelProbe.jpg")]
         ),
         .testTarget(
@@ -40,7 +44,11 @@ let package = Package(
         ),
         .testTarget(
             name: "VideoContextAppTests",
-            dependencies: ["VideoContextApp", "VideoContextCore"]
+            dependencies: [
+                "VideoContextApp",
+                "VideoContextCore",
+                .product(name: "MCP", package: "swift-sdk")
+            ]
         )
     ],
     swiftLanguageModes: [.v6]

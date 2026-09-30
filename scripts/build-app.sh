@@ -11,17 +11,22 @@ mkdir -p "$module_cache"
 
 CLANG_MODULE_CACHE_PATH="$module_cache" \
 SWIFTPM_MODULECACHE_OVERRIDE="$module_cache" \
-swift build --disable-sandbox --scratch-path "$build_root" -c release --product VideoContext
+swift build --disable-sandbox --scratch-path "$build_root" -c release -debug-info-format none --product VideoContext
 
 CLANG_MODULE_CACHE_PATH="$module_cache" \
 SWIFTPM_MODULECACHE_OVERRIDE="$module_cache" \
-swift build --disable-sandbox --scratch-path "$build_root" -c release --product video-context-mcp
+swift build --disable-sandbox --scratch-path "$build_root" -c release -debug-info-format none --product video-context-mcp
 
 bin_path="$(CLANG_MODULE_CACHE_PATH="$module_cache" SWIFTPM_MODULECACHE_OVERRIDE="$module_cache" swift build --disable-sandbox --scratch-path "$build_root" -c release --show-bin-path)"
 
 mkdir -p "$contents/MacOS" "$contents/Resources"
 CLANG_MODULE_CACHE_PATH="$module_cache" swift "$project_root/scripts/generate-icon.swift" "$build_root/AppIcon.iconset"
-iconutil -c icns "$build_root/AppIcon.iconset" -o "$contents/Resources/AppIcon.icns"
+if ! iconutil -c icns "$build_root/AppIcon.iconset" -o "$contents/Resources/AppIcon.icns"; then
+    # The icon is unchanged in this build. Keep the existing packaged icon when
+    # iconutil rejects a regenerated iconset on the current macOS runtime.
+    test -s "$contents/Resources/AppIcon.icns"
+    echo "Using the existing AppIcon.icns after iconutil rejected the regenerated iconset."
+fi
 cp "$project_root/Resources/Info.plist" "$contents/Info.plist"
 cp "$bin_path/VideoContext" "$contents/MacOS/VideoContext"
 cp "$bin_path/video-context-mcp" "$contents/MacOS/video-context-mcp"

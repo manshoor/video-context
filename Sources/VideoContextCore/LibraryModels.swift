@@ -22,6 +22,7 @@ public enum ProcessingStatus: String, Codable, Sendable, CaseIterable {
 public struct VideoRecord: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public var title: String
+    public var projectID: String?
     public let source: VideoSource
     public let sourceValue: String
     public var mediaRelativePath: String
@@ -45,9 +46,11 @@ public struct VideoRecord: Codable, Equatable, Sendable, Identifiable {
         createdAt: Date = .now,
         updatedAt: Date = .now,
         revisions: ArtifactRevision = .init(),
-        estimatedCostUSD: Double = 0
+        estimatedCostUSD: Double = 0,
+        projectID: String? = nil
     ) {
         self.id = id
+        self.projectID = projectID
         self.title = title
         self.source = source
         self.sourceValue = sourceValue
@@ -98,6 +101,9 @@ public enum EvidenceOrigin: String, Codable, Sendable {
 public struct EvidenceItem: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public let videoID: String
+    /// The frame time requested from the media tool. `timestamp` remains the
+    /// measured frame PTS. Older evidence rows have no requested value.
+    public let requestedTimestamp: TimeInterval?
     public let timestamp: TimeInterval
     public let imageRelativePath: String
     public var ocrText: String
@@ -106,6 +112,7 @@ public struct EvidenceItem: Codable, Equatable, Sendable, Identifiable {
     public init(
         id: String = "ev_\(UUID().uuidString.lowercased())",
         videoID: String,
+        requestedTimestamp: TimeInterval? = nil,
         timestamp: TimeInterval,
         imageRelativePath: String,
         ocrText: String = "",
@@ -113,6 +120,7 @@ public struct EvidenceItem: Codable, Equatable, Sendable, Identifiable {
     ) {
         self.id = id
         self.videoID = videoID
+        self.requestedTimestamp = requestedTimestamp
         self.timestamp = timestamp
         self.imageRelativePath = imageRelativePath
         self.ocrText = ocrText

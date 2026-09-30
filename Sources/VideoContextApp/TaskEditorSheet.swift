@@ -13,6 +13,7 @@ struct TaskEditorSheet: View {
     @State private var annotating: EvidenceItem?
     @State private var showOriginal = false
     @State private var failure: String?
+    @State private var showGenerationUsage = false
     init(model: AppModel, initial: VideoTask, source: ArtifactRevision, isNew: Bool) {
         self.model = model; self.source = source; self.isNew = isNew
         _draft = State(initialValue: initial); _saved = State(initialValue: initial); _exists = State(initialValue: !isNew)
@@ -28,6 +29,12 @@ struct TaskEditorSheet: View {
                 Button("Save", systemImage: "checkmark") { Task { await save() } }.disabled(saving || !dirty).keyboardShortcut("s", modifiers: .command)
             }
             Text("\(draft.id) · revision \(saved.revision)").font(.caption.monospaced()).textSelection(.enabled)
+            if draft.generationRunID != nil {
+                Button("View generation usage", systemImage: "chart.bar.xaxis") { showGenerationUsage = true }
+                Text("Shared usage for the run that generated this task.").font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text(draft.provenance == nil ? "Manual task · no generation usage" : "Earlier task · generation run unavailable").font(.caption).foregroundStyle(.secondary)
+            }
             if let library, draft.isStale(library.video) { Label("Evidence changed. Reconcile generation proposals before reviewing.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -48,6 +55,13 @@ struct TaskEditorSheet: View {
                         }.padding(10).background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
                     }
                     Button("Add question", systemImage: "plus.bubble") { draft.content.questions.append(.init(question: "")) }
+                    TaskAnalysisEvidenceView(content: draft.content)
+                    if draft.content.evidenceReview != nil, library?.video.projectID != nil {
+                        Button("Open project task to review evidence again", systemImage: "arrow.up.forward.square") {
+                            model.selectProjectTask(.recording(videoID: draft.videoID, taskID: draft.id))
+                            dismiss()
+                        }.disabled(dirty || saving)
+                    }
                     Text("Linked evidence").font(.headline)
                     Text("Choose transcript passages and screenshots. Click a timestamp to seek in the recording.").font(.caption).foregroundStyle(.secondary)
                     if let library {
@@ -83,10 +97,13 @@ struct TaskEditorSheet: View {
                         else { failure = model.errorMessage }
                     }
                 }.buttonStyle(.borderedProminent)
-                    .disabled(dirty || saving || draft.archived || draft.content.blockers > 0 || draft.content.checks.isEmpty || draft.content.behavior.isEmpty || library.map { draft.isStale($0.video) || $0.video.status != .ready } != false)
+                    .disabled(dirty || saving || draft.archived || draft.content.blockers > 0 || draft.content.checks.isEmpty || draft.content.behavior.isEmpty || (draft.content.evidenceReview.map { [.awaitingReview, .failed].contains($0.status) } ?? false) || library.map { draft.isStale($0.video) || $0.video.status != .ready } != false)
             }
         }.padding(20).frame(minWidth: 700, idealWidth: 820, minHeight: 600, idealHeight: 760)
         .interactiveDismissDisabled(dirty)
+        .sheet(isPresented: $showGenerationUsage) {
+            AIUsageView(model: model, scope: .init(videoID: draft.videoID, runID: draft.generationRunID))
+        }
         .sheet(item: $annotating) { evidence in
             TaskAnnotationEditor(evidence: evidence, imageURL: model.imageURL(for: evidence), initial: draft.content.annotations.filter { $0.evidenceID == evidence.id }) { annotations in
                 draft.content.annotations.removeAll { $0.evidenceID == evidence.id }; draft.content.annotations += annotations
@@ -141,6 +158,7 @@ struct TaskContentSummary: View {
             ForEach(content.questions) { Text("\($0.question)\nAnswer: \($0.answer)\nBlocking: \($0.isBlocking ? "Yes" : "No")\nReason: \($0.nonBlockingReason)\nDisagreement: \($0.disagreement)") }
             Text("Evidence: \(content.allSourceIDs.sorted().joined(separator: ", "))").font(.caption)
             ForEach(content.annotations) { Text("Annotation: \($0.text)") }
+            TaskAnalysisEvidenceView(content: content)
         }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
     }
 }

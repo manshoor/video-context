@@ -6,6 +6,27 @@ enum WorkspaceStyle {
     static let cornerRadius: CGFloat = 10
 }
 
+enum TaskDisplayOrigin {
+    case recording, feedback, request
+    var label: String {
+        switch self { case .recording: "Recording"; case .feedback: "Feedback"; case .request: "Request" }
+    }
+    var color: Color {
+        switch self { case .recording: .indigo; case .feedback: .orange; case .request: .purple }
+    }
+}
+
+struct TaskOriginBadge: View {
+    let origin: TaskDisplayOrigin
+    var body: some View {
+        Text(origin.label).font(.caption2.bold())
+            .foregroundStyle(origin.color)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(origin.color.opacity(0.12), in: Capsule())
+            .accessibilityLabel("Task source: \(origin.label)")
+    }
+}
+
 struct RecordingStatusBadge: View {
     let state: AgentHandoffState
     var body: some View {
@@ -102,6 +123,7 @@ struct CredentialNotice: View {
             if model.shouldOfferCredentialUnlock {
                 Button("Unlock API key", systemImage: "key.horizontal") { model.unlockAPIKey() }
             } else if model.credentialState == .missing {
+                Button("Load saved key") { model.reloadSavedAPIKey() }.disabled(!model.canReloadSavedAPIKey)
                 SettingsLink { Label("Settings", systemImage: "gearshape") }
             }
         }
@@ -109,4 +131,10 @@ struct CredentialNotice: View {
         .padding(10)
         .background(.quaternary, in: .rect(cornerRadius: 8))
     }
+}
+
+func formatTime(_ seconds: TimeInterval) -> String {
+    guard seconds.isFinite else { return "--:--" }
+    let value = max(0, Int(seconds.rounded()))
+    return String(format: "%02d:%02d", value / 60, value % 60)
 }

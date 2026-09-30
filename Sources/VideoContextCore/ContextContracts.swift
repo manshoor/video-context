@@ -21,7 +21,7 @@ public struct PaginationCursor: Codable, Equatable, Sendable {
     }
 }
 
-public struct ArtifactRevision: Codable, Equatable, Sendable {
+public struct ArtifactRevision: Codable, Equatable, Hashable, Sendable {
     public var transcript: Int
     public var evidence: Int
     public var brief: Int
@@ -64,6 +64,45 @@ public struct ArtifactRevision: Codable, Equatable, Sendable {
         next.briefSourceTranscript = transcript
         next.briefSourceEvidence = evidence
         return next
+    }
+}
+
+/// A continuation cursor that is valid only for the exact recording scope and
+/// artifact revision used to create it. Older offset-only cursors are not
+/// accepted by revision-bound MCP reads, because they could otherwise resume
+/// against a different transcript or brief after an edit.
+public struct RevisionBoundCursor: Codable, Equatable, Hashable, Sendable {
+    public let scope: String
+    public let revisions: ArtifactRevision
+    public let offset: Int
+
+    public init(scope: String, revisions: ArtifactRevision, offset: Int) {
+        self.scope = scope
+        self.revisions = revisions
+        self.offset = max(0, offset)
+    }
+
+    public var encoded: String {
+        (try? JSONEncoder().encode(self).base64EncodedString()) ?? ""
+    }
+
+    public init?(encoded: String) {
+        guard let data = Data(base64Encoded: encoded),
+              let value = try? JSONDecoder().decode(Self.self, from: data),
+              value.offset >= 0 else { return nil }
+        self = value
+    }
+
+    public static func decode(
+        _ encoded: String?,
+        scope: String,
+        revisions: ArtifactRevision
+    ) throws -> Self {
+        guard let encoded else { return Self(scope: scope, revisions: revisions, offset: 0) }
+        guard let value = Self(encoded: encoded), value.scope == scope, value.revisions == revisions else {
+            throw VideoContextStoreError.invalidCursor
+        }
+        return value
     }
 }
 

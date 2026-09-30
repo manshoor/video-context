@@ -18,12 +18,12 @@ public enum OpenAIRequestBuilder {
         return request
     }
 
-    public static func analysis(apiKey: String, model: String, prompt: String, images: [Data]) throws -> URLRequest {
+    public static func analysis(apiKey: String, model: String, prompt: String, images: [Data], reasoningEffort: ReasoningEffort? = nil) throws -> URLRequest {
         var content: [[String: Any]] = [["type": "input_text", "text": prompt]]
         content.append(contentsOf: images.map {
             ["type": "input_image", "image_url": "data:image/jpeg;base64,\($0.base64EncodedString())"]
         })
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "model": model,
             "input": [["role": "user", "content": content]],
             "text": ["format": [
@@ -43,6 +43,7 @@ public enum OpenAIRequestBuilder {
                 ]
             ]]
         ]
+        if let reasoningEffort { payload["reasoning"] = ["effort": reasoningEffort.rawValue] }
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -65,6 +66,32 @@ public struct HTTPResult: Sendable {
 
 public protocol HTTPDataLoading: Sendable {
     func data(for request: URLRequest) async throws -> HTTPResult
+    func data(for request: URLRequest, redirectPolicy: HTTPRedirectPolicy) async throws -> HTTPResult
+}
+
+public struct HTTPRedirectPolicy: Sendable {
+    public let allowedHosts: Set<String>
+    public let maximumBytes: Int?
+    public init(allowedHosts: Set<String>, maximumBytes: Int? = nil) {
+        self.allowedHosts = Set(allowedHosts.map { $0.lowercased() })
+        self.maximumBytes = maximumBytes
+    }
+    public func allows(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https" &&
+        url.host.map { allowedHosts.contains($0.lowercased()) } == true &&
+        url.user == nil && url.password == nil &&
+        (url.port == nil || url.port == 443)
+    }
+}
+
+public enum HTTPRedirectError: Error, Sendable {
+    case rejected
+}
+
+extension HTTPDataLoading {
+    public func data(for request: URLRequest, redirectPolicy: HTTPRedirectPolicy) async throws -> HTTPResult {
+        throw HTTPRedirectError.rejected
+    }
 }
 
 public struct APIUsageValues: Equatable, Sendable {
@@ -122,7 +149,7 @@ public struct APIUsageRecordingClient<Base: HTTPDataLoading>: HTTPDataLoading, S
 
     public func data(for request: URLRequest) async throws -> HTTPResult {
         let result = try await base.data(for: request)
-        guard (200..<300).contains(result.statusCode) else { return result }
+        guard UsageTrace.session == nil, (200..<300).contains(result.statusCode) else { return result }
         let isTranscription = request.url?.path.contains("/audio/transcriptions") == true
         let values = APIUsageDecoder.decode(result.data)
         try? await store.recordAPIUsage(APIUsageRecord(
@@ -148,6 +175,60 @@ public struct URLSessionHTTPClient: HTTPDataLoading {
             throw OpenAIClientError.invalidHTTPResponse
         }
         return HTTPResult(data: data, statusCode: http.statusCode)
+    }
+
+    public func data(for request: URLRequest, redirectPolicy: HTTPRedirectPolicy) async throws -> HTTPResult {
+        guard let url = request.url, redirectPolicy.allows(url) else { throw HTTPRedirectError.rejected }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        let session = URLSession(configuration: configuration)
+        let delegate = GuardedHTTPRedirectDelegate(policy: redirectPolicy)
+        defer { session.invalidateAndCancel() }
+        do {
+            let data: Data
+            let response: URLResponse
+            if let maximumBytes = redirectPolicy.maximumBytes {
+                let (stream, received) = try await session.bytes(for: request, delegate: delegate)
+                response = received
+                var bounded = Data()
+                bounded.reserveCapacity(min(maximumBytes, 64_000))
+                for try await byte in stream {
+                    guard bounded.count < maximumBytes else { throw HTTPResponseSizeError.exceeded }
+                    bounded.append(byte)
+                }
+                data = bounded
+            } else {
+                (data, response) = try await session.data(for: request, delegate: delegate)
+            }
+            guard !delegate.didReject else { throw HTTPRedirectError.rejected }
+            guard let http = response as? HTTPURLResponse,
+                  let finalURL = http.url, redirectPolicy.allows(finalURL) else { throw HTTPRedirectError.rejected }
+            return HTTPResult(data: data, statusCode: http.statusCode)
+        } catch {
+            if delegate.didReject { throw HTTPRedirectError.rejected }
+            throw error
+        }
+    }
+}
+
+public enum HTTPResponseSizeError: Error, Sendable { case exceeded }
+
+private final class GuardedHTTPRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    let policy: HTTPRedirectPolicy
+    private let lock = NSLock()
+    private var rejected = false
+    init(policy: HTTPRedirectPolicy) { self.policy = policy }
+    var didReject: Bool { lock.lock(); defer { lock.unlock() }; return rejected }
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        guard let url = request.url, policy.allows(url) else {
+            lock.lock(); rejected = true; lock.unlock()
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 }
 

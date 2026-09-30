@@ -12,10 +12,12 @@ public struct AudioChunkFile: Equatable, Sendable {
 
 public struct CapturedFrame: Equatable, Sendable {
     public let timestamp: TimeInterval
+    public let requestedTimestamp: TimeInterval
     public let url: URL
 
-    public init(timestamp: TimeInterval, url: URL) {
+    public init(timestamp: TimeInterval, url: URL, requestedTimestamp: TimeInterval? = nil) {
         self.timestamp = timestamp
+        self.requestedTimestamp = requestedTimestamp ?? timestamp
         self.url = url
     }
 }
@@ -26,6 +28,19 @@ public protocol MediaProcessing: Sendable {
     func sceneChanges(in videoURL: URL) async throws -> [TimeInterval]
     func extractAudio(from videoURL: URL, chunks: [AudioChunk], directory: URL) async throws -> [AudioChunkFile]
     func captureFrames(from videoURL: URL, timestamps: [TimeInterval], directory: URL) async throws -> [CapturedFrame]
+}
+
+/// Optional streaming support for media processors that can publish each
+/// completed frame before the entire capture batch finishes. The pipeline uses
+/// this to persist a frame checkpoint immediately, so an interrupted batch can
+/// resume from the first uncaptured timestamp.
+public protocol IncrementalFrameCapturing: Sendable {
+    func captureFrames(
+        from videoURL: URL,
+        timestamps: [TimeInterval],
+        directory: URL,
+        onFrame: @escaping @Sendable (CapturedFrame) async throws -> Void
+    ) async throws -> [CapturedFrame]
 }
 
 public protocol Transcribing: Sendable {

@@ -65,6 +65,7 @@ public struct TaskMCPService: Sendable {
         let snapshot = try await store.taskSnapshot(videoID: videoID)
         let task = try Self.exactTask(snapshot, taskID: taskID, expectedRevision: expectedRevision)
         var blocks = [TaskContextBlock(kind: "title", text: task.content.title), .init(kind: "requested_behavior", text: task.content.behavior)]
+        blocks += try TaskAnalysisMCPBlocks.make(content: task.content, projectID: snapshot.video.projectID)
         for (kind, statements) in [("requirement", task.content.requirements), ("acceptance_check", task.content.checks)] {
             for statement in statements {
                 blocks.append(.init(kind: kind, text: "\(statement.id): \(statement.text)", origin: statement.origin))

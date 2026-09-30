@@ -90,9 +90,15 @@ struct VideoProcessingPipelineTests {
             briefGenerator: FailingBriefGenerator()
         )
 
+        let diagnostics = DiagnosticsService.library(fixture.paths, component: .app)
+        _ = try await diagnostics.enable()
+        let scope = DiagnosticScope(service: diagnostics, operation: .processing, context: .init(videoID: video.id))
         await #expect(throws: FixtureFailure.self) {
-            try await pipeline.process(videoID: video.id)
+            try await DiagnosticTrace.$scope.withValue(scope) { try await pipeline.process(videoID: video.id) }
         }
+        let events = try await diagnostics.events(since: .distantPast)
+        #expect(events.contains { $0.event == .failed && $0.entry.stage == .analyzing })
+        #expect(!String(decoding: try JSONEncoder().encode(events), as: UTF8.self).contains("brief failed"))
 
         let snapshot = try #require(try await store.videoSnapshot(id: video.id))
         #expect(snapshot.video.status == .incomplete)
@@ -134,12 +140,64 @@ struct VideoProcessingPipelineTests {
             briefGenerator: FixtureBriefGenerator()
         )
 
-        try await pipeline.process(videoID: video.id)
+        let diagnostics = DiagnosticsService.library(fixture.paths, component: .app)
+        _ = try await diagnostics.enable()
+        let scope = DiagnosticScope(service: diagnostics, operation: .processing, context: .init(videoID: video.id))
+        try await DiagnosticTrace.$scope.withValue(scope) { try await pipeline.process(videoID: video.id) }
+        let checkpoints = try await diagnostics.events(since: .distantPast).filter { $0.event == .checkpointReused }
+        #expect(Set(checkpoints.compactMap { $0.entry.stage }) == [.transcribing, .recognizingText])
 
         let snapshot = try #require(try await store.videoSnapshot(id: video.id))
         #expect(snapshot.video.status == .ready)
         #expect(snapshot.transcript.map(\.text) == ["Keep this transcript"])
         #expect(snapshot.evidence.map(\.ocrText) == ["Saved evidence"])
+    }
+
+    @Test("Incremental frame checkpoints survive an interrupted capture batch")
+    func interruptedFrameBatchResumesOnlyMissingFrames() async throws {
+        let fixture = try PipelineFixture()
+        let store = try VideoContextStore(databaseURL: fixture.paths.database)
+        let mediaURL = try fixture.makeMedia(videoID: "vid_incremental_frames")
+        let video = VideoRecord(
+            id: "vid_incremental_frames",
+            title: "Incremental frames",
+            source: .localFile,
+            sourceValue: mediaURL.path,
+            mediaRelativePath: fixture.paths.relativePath(for: mediaURL)
+        )
+        try await store.createVideo(video)
+        let captureState = IncrementalCaptureState()
+
+        let first = VideoProcessingPipeline(
+            store: store,
+            paths: fixture.paths,
+            media: IncrementalFrameMediaProcessor(state: captureState),
+            transcriber: SavedTranscriptOnly(),
+            textRecognizer: FixtureTextRecognizer(),
+            briefGenerator: FixtureBriefGenerator()
+        )
+        await #expect(throws: (any Error).self) {
+            try await first.process(videoID: video.id)
+        }
+
+        let firstCheckpoints = try await store.processingCheckpoints(videoID: video.id)
+        #expect(firstCheckpoints.filter { $0.stage == .frameCapture && $0.state == .completed }.count == 1)
+
+        let second = VideoProcessingPipeline(
+            store: store,
+            paths: fixture.paths,
+            media: IncrementalFrameMediaProcessor(state: captureState),
+            transcriber: SavedTranscriptOnly(),
+            textRecognizer: FixtureTextRecognizer(),
+            briefGenerator: FixtureBriefGenerator()
+        )
+        try await second.process(videoID: video.id)
+
+        #expect(await captureState.calls == [[0, 3], [3]])
+        let snapshot = try #require(try await store.videoSnapshot(id: video.id))
+        #expect(snapshot.video.status == .ready)
+        #expect(snapshot.evidence.count == 2)
+        #expect(try await store.processingCheckpoints(videoID: video.id).filter { $0.stage == .frameCapture && $0.state == .completed }.count == 2)
     }
 
     @Test("Cancellation persists a recoverable recording state")
@@ -298,6 +356,55 @@ private struct ResumeMediaProcessor: MediaProcessing {
     func sceneChanges(in videoURL: URL) async throws -> [TimeInterval] { throw FixtureFailure.failed }
     func extractAudio(from videoURL: URL, chunks: [AudioChunk], directory: URL) async throws -> [AudioChunkFile] { throw FixtureFailure.failed }
     func captureFrames(from videoURL: URL, timestamps: [TimeInterval], directory: URL) async throws -> [CapturedFrame] { throw FixtureFailure.failed }
+}
+
+private actor IncrementalCaptureState {
+    private var failsNextBatch = true
+    private(set) var calls: [[TimeInterval]] = []
+
+    func begin(_ timestamps: [TimeInterval]) -> Bool {
+        calls.append(timestamps)
+        if failsNextBatch {
+            failsNextBatch = false
+            return true
+        }
+        return false
+    }
+}
+
+private struct IncrementalFrameMediaProcessor: MediaProcessing, IncrementalFrameCapturing {
+    let state: IncrementalCaptureState
+
+    func inspect(_ videoURL: URL) async throws -> MediaInspection {
+        MediaInspection(duration: 5, hasVideo: true, hasAudio: false)
+    }
+
+    func silencePoints(in videoURL: URL) async throws -> [TimeInterval] { [] }
+    func sceneChanges(in videoURL: URL) async throws -> [TimeInterval] { [3] }
+    func extractAudio(from videoURL: URL, chunks: [AudioChunk], directory: URL) async throws -> [AudioChunkFile] { [] }
+
+    func captureFrames(from videoURL: URL, timestamps: [TimeInterval], directory: URL) async throws -> [CapturedFrame] {
+        try await captureFrames(from: videoURL, timestamps: timestamps, directory: directory, onFrame: { _ in })
+    }
+
+    func captureFrames(
+        from videoURL: URL,
+        timestamps: [TimeInterval],
+        directory: URL,
+        onFrame: @escaping @Sendable (CapturedFrame) async throws -> Void
+    ) async throws -> [CapturedFrame] {
+        let failAfterFirstFrame = await state.begin(timestamps)
+        var frames: [CapturedFrame] = []
+        for (index, timestamp) in timestamps.enumerated() {
+            let url = directory.appending(path: "frame-\(Int(timestamp)).jpg")
+            try Data([0xFF, 0xD8, 0xFF]).write(to: url)
+            let frame = CapturedFrame(timestamp: timestamp + 0.5, url: url, requestedTimestamp: timestamp)
+            try await onFrame(frame)
+            frames.append(frame)
+            if failAfterFirstFrame && index == 0 { throw FixtureFailure.failed }
+        }
+        return frames
+    }
 }
 
 private struct FailingTranscriber: Transcribing {

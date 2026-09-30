@@ -29,3 +29,9 @@ dist/
 /.hermes/
 /.pi/
 /skills-lock.json
+
+# Local diagnostics and test interpreter caches
+diagnostics/
+VideoContext-diagnostics*.zip
+*.ips
+__pycache__/

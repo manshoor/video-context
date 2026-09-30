@@ -48,6 +48,12 @@ public struct LibraryPaths: Sendable {
         return directory
     }
 
+    public func feedbackDirectory(id: String) throws -> URL {
+        let directory = root.appending(path: "feedback", directoryHint: .isDirectory).appending(path: id, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
     public func absoluteURL(relativePath: String) -> URL {
         root.appending(path: relativePath)
     }

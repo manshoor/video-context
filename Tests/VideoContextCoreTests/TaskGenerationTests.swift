@@ -15,9 +15,12 @@ actor TaskTestHTTP: HTTPDataLoading {
 }
 struct TaskGenerationTests {
     static func result(_ output: String = "{\"tasks\":[]}", provider: AnalysisProvider = .lmStudio) throws -> HTTPResult {
-        let object: [String: Any] = provider == .lmStudio
-            ? ["choices": [["finish_reason": "stop", "message": ["content": output]]]]
-            : ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": output]]]]]
+        let object: [String: Any]
+        switch provider {
+        case .lmStudio, .deepSeek: object = ["choices": [["finish_reason": "stop", "message": ["content": output]]]]
+        case .claude: object = ["stop_reason": "end_turn", "content": [["type": "text", "text": output]]]
+        case .openAI: object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": output]]]]]
+        }
         return HTTPResult(data: try JSONSerialization.data(withJSONObject: object), statusCode: 200)
     }
     func fixture(text: String = "Change the save label") async throws -> (LibraryPaths, VideoContextStore, TaskLibrarySnapshot, BriefDocument) {
@@ -30,26 +33,41 @@ struct TaskGenerationTests {
         return (paths, store, try await store.taskSnapshot(videoID: video.id), brief)
     }
     static let taskJSON = #"{"tasks":[{"targetTaskID":"","title":"Save label","behavior":"Use Save","requirements":[{"text":"Use Save","origin":"recording","sourceIDs":["seg_test"]}],"checks":[{"text":"Button displays Save","origin":"interpretation","sourceIDs":["seg_test"]}],"questions":[],"sourceIDs":["seg_test"]}]}"#
-    @Test(arguments: [AnalysisProvider.lmStudio, .openAI])
+    @Test func sourceWideDeletionGateStopsBeforeProviderWork() async throws {
+        let (paths, store, snapshot, brief) = try await fixture()
+        let task = try await store.saveTask(.init(videoID: snapshot.video.id, sourceRevision: snapshot.video.revisions,
+            content: .init(title: "Deleted task")), expectedRevision: nil, expectedSource: snapshot.video.revisions)
+        let preview = try await store.previewProjectTaskDeletion(projectID: nil, selected: [.recording(videoID: snapshot.video.id, taskID: task.id)])
+        try await store.deleteProjectTasks(preview)
+        let client = TaskTestHTTP([])
+        let generator = TaskGenerator(client: client, configuration: .init(analysisProvider: .lmStudio), credential: "")
+        let current = try await store.taskSnapshot(videoID: snapshot.video.id)
+        await #expect(throws: (any Error).self) { try await generator.generate(snapshot: current, brief: brief, paths: paths, store: store) }
+        #expect(await client.requests.isEmpty)
+    }
+    @Test(arguments: AnalysisProvider.allCases)
     func bothProvidersGenerateStructuredProposals(provider: AnalysisProvider) async throws {
         let (paths, store, snapshot, brief) = try await fixture()
         let client = TaskTestHTTP([try Self.result(Self.taskJSON, provider: provider), try Self.result(provider: provider)])
-        let config = ModelConfiguration(analysisProvider: provider, lmStudio: .init(modelID: "vision"))
-        let generator = TaskGenerator(client: client, configuration: config, credential: provider == .openAI ? "mock-key" : "")
+        let config = ModelConfiguration(analysisProvider: provider, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash")
+        let generator = TaskGenerator(client: client, configuration: config, credential: "mock-key")
         let proposals = try await generator.generate(snapshot: snapshot, brief: brief, paths: paths, store: store)
         #expect(proposals.count == 1)
         #expect(proposals[0].content?.checks[0].origin == .interpretation)
         #expect(try await store.taskSnapshot(videoID: snapshot.video.id).tasks.isEmpty)
         let requests = await client.requests
         #expect(requests.count == 2)
-        #expect(requests.allSatisfy { $0.url?.host == (provider == .lmStudio ? "127.0.0.1" : "api.openai.com") })
-        #expect(String(decoding: requests[0].httpBody!, as: UTF8.self).contains("json_schema"))
+        let host: String = switch provider { case .lmStudio: "127.0.0.1"; case .openAI: "api.openai.com"; case .claude: "api.anthropic.com"; case .deepSeek: "api.deepseek.com" }
+        #expect(requests.allSatisfy { $0.url?.host == host })
+        #expect(String(decoding: requests[0].httpBody!, as: UTF8.self).contains(provider == .deepSeek ? "json_object" : "json_schema"))
         let payload = try #require(try JSONSerialization.jsonObject(with: requests[0].httpBody!) as? [String: Any])
         if provider == .lmStudio {
             let messages = try #require(payload["messages"] as? [[String: Any]])
             #expect(messages.map { $0["role"] as? String } == ["system", "user"])
             #expect(payload["temperature"] as? Double == 0.7)
-        } else { #expect(payload["instructions"] as? String != nil) }
+        } else if provider == .openAI { #expect(payload["instructions"] as? String != nil) }
+        else if provider == .claude { #expect(payload["system"] as? String != nil) }
+        else { #expect(payload["messages"] != nil) }
         let usage = try #require(try await store.videoSnapshot(id: snapshot.video.id)).apiUsage
         #expect(usage.allSatisfy { $0.stage == .taskGeneration })
         try await store.resolveTaskProposal(videoID: snapshot.video.id, proposalID: proposals[0].id, apply: true)
@@ -58,7 +76,7 @@ struct TaskGenerationTests {
     }
     @Test func failureReusesValidatedCheckpoint() async throws {
         let (paths, store, snapshot, brief) = try await fixture()
-        let config = ModelConfiguration(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision"))
+        let config = ModelConfiguration(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash")
         let first = TaskTestHTTP([try Self.result(Self.taskJSON), .init(data: Data(), statusCode: 503)])
         await #expect(throws: (any Error).self) { try await TaskGenerator(client: first, configuration: config, credential: "").generate(snapshot: snapshot, brief: brief, paths: paths, store: store) }
         #expect(try await store.taskSnapshot(videoID: snapshot.video.id).proposals.isEmpty)
@@ -71,7 +89,7 @@ struct TaskGenerationTests {
         let text = String(repeating: "visible label ", count: 300) + "FINAL_REQUIREMENT"
         let (paths, store, snapshot, brief) = try await fixture(text: text)
         let client = TaskTestHTTP([.init(data: Data(#"{"error":{"message":"context length exceeded"}}"#.utf8), statusCode: 400)] + Array(repeating: try Self.result(), count: 10))
-        let config = ModelConfiguration(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision"))
+        let config = ModelConfiguration(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash")
         _ = try await TaskGenerator(client: client, configuration: config, credential: "").generate(snapshot: snapshot, brief: brief, paths: paths, store: store)
         let requests = await client.requests
         #expect(requests.count >= 4)
@@ -91,14 +109,21 @@ struct TaskGenerationTests {
             try TaskGenerationSchema.decode(response, provider: .lmStudio)
         }
     }
-    @Test(arguments: [AnalysisProvider.lmStudio, .openAI])
+    @Test(arguments: AnalysisProvider.allCases)
     func schemaConstrainsReferencesAndDoesNotAllowInventedUserClarifications(provider: AnalysisProvider) throws {
-        let request = try TaskGenerationSchema.request(provider: provider, configuration: .init(analysisProvider: provider, lmStudio: .init(modelID: "vision")), credential: "test", prompt: "SOURCE seg_test", images: [], allowedSourceIDs: ["seg_test", "ev_test"])
+        let request = try TaskGenerationSchema.request(provider: provider, configuration: .init(analysisProvider: provider, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash"), credential: "test", prompt: "SOURCE seg_test", images: [], allowedSourceIDs: ["seg_test", "ev_test"])
         let body = try #require(try JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
-        let format: [String: Any]
-        if provider == .lmStudio { format = (body["response_format"] as! [String: Any])["json_schema"] as! [String: Any] }
-        else { format = (body["text"] as! [String: Any])["format"] as! [String: Any] }
-        let schema = format["schema"] as! [String: Any]
+        let schema: [String: Any]
+        switch provider {
+        case .lmStudio: schema = ((body["response_format"] as! [String: Any])["json_schema"] as! [String: Any])["schema"] as! [String: Any]
+        case .openAI: schema = ((body["text"] as! [String: Any])["format"] as! [String: Any])["schema"] as! [String: Any]
+        case .claude: schema = ((body["output_config"] as! [String: Any])["format"] as! [String: Any])["schema"] as! [String: Any]
+        case .deepSeek:
+            let messages = body["messages"] as! [[String: Any]]
+            let system = messages[0]["content"] as! String
+            let json = system.components(separatedBy: "Return only JSON matching this schema: ").last!
+            schema = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+        }
         let tasks = (schema["properties"] as! [String: Any])["tasks"] as! [String: Any]
         let properties = (tasks["items"] as! [String: Any])["properties"] as! [String: Any]
         let sources = properties["sourceIDs"] as! [String: Any]
@@ -138,7 +163,7 @@ struct TaskGenerationTests {
         let client = TaskTestHTTP([])
         let task = Task {
             try Task.checkCancellation()
-            return try await TaskGenerator(client: client, configuration: .init(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision")), credential: "").generate(snapshot: snapshot, brief: brief, paths: paths, store: store)
+            return try await TaskGenerator(client: client, configuration: .init(analysisProvider: .lmStudio, lmStudio: .init(modelID: "vision"), claudeModel: "claude-fixture", deepSeekModel: "deepseek-flash"), credential: "").generate(snapshot: snapshot, brief: brief, paths: paths, store: store)
         }
         task.cancel()
         await #expect(throws: CancellationError.self) { try await task.value }

@@ -1,6 +1,6 @@
 import Foundation
 
-public struct FFmpegMediaProcessor<Runner: CommandRunning>: MediaProcessing, Sendable {
+public struct FFmpegMediaProcessor<Runner: CommandRunning>: MediaProcessing, IncrementalFrameCapturing, Sendable {
     private let toolchain: MediaToolchain
     private let runner: Runner
 
@@ -64,24 +64,36 @@ public struct FFmpegMediaProcessor<Runner: CommandRunning>: MediaProcessing, Sen
     }
 
     public func captureFrames(from videoURL: URL, timestamps: [TimeInterval], directory: URL) async throws -> [CapturedFrame] {
+        try await captureFrames(from: videoURL, timestamps: timestamps, directory: directory, onFrame: { _ in })
+    }
+
+    public func captureFrames(
+        from videoURL: URL,
+        timestamps: [TimeInterval],
+        directory: URL,
+        onFrame: @escaping @Sendable (CapturedFrame) async throws -> Void
+    ) async throws -> [CapturedFrame] {
         var frames: [CapturedFrame] = []
         for timestamp in timestamps {
             try Task.checkCancellation()
             let milliseconds = Int((timestamp * 1_000).rounded())
             let outputURL = directory.appending(path: String(format: "frame-%010d.jpg", milliseconds))
-            _ = try await run(
+            let output = try await run(
                 ProcessCommand(
                     executable: toolchain.ffmpeg,
                     arguments: [
-                        "-hide_banner", "-loglevel", "error", "-y",
-                        "-ss", String(format: "%.3f", timestamp),
+                        "-hide_banner", "-loglevel", "info", "-y",
                         "-i", videoURL.path,
-                        "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "3",
+                        "-ss", String(format: "%.3f", timestamp),
+                        "-frames:v", "1", "-vf", "scale=1280:-2,showinfo", "-q:v", "3",
                         outputURL.path
                     ]
                 )
             )
-            frames.append(CapturedFrame(timestamp: timestamp, url: outputURL))
+            let actualTimestamp = FFmpegOutputParser.firstFrameTimestamp(output.text) ?? timestamp
+            let frame = CapturedFrame(timestamp: actualTimestamp, url: outputURL, requestedTimestamp: timestamp)
+            try await onFrame(frame)
+            frames.append(frame)
         }
         return frames
     }

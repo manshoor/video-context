@@ -29,6 +29,8 @@ public enum TaskHandoff {
 
         Call get_video_task with video_id="\(snapshot.video.id)", each selected task_id, and its expected_revision above. Follow every continuation cursor. Inspect linked transcript with get_video_segment and screenshots/annotations with get_task_frame, using the same video_id, task_id, and expected_revision. User clarifications and annotation notes are identified separately from recorded statements.
 
+        Task retrieval also supplies project evidence requests, source revisions, AI review findings, visual verification, and dependencies when available. Follow exact get_project_evidence arguments. Retrieve cited reviewed documents with get_project_document and the expected revision in the source manifest. AI review is separate from human approval. Stop dependent work if cross-references are stale or review is incomplete.
+
         Keep implementation scoped to the selected tasks. Do not implement unselected tasks, call list_videos, switch recordings, or guess substitute evidence. Report prerequisites that need work outside this selection. Draft, stale, or blocked tasks require further review before implementation.
 
         If an ID, revision, or evidence is unavailable, stop dependent work and request an updated handoff. Check supporting evidence before making changes. If the MCP tools are unavailable, ask me to connect the Video Context MCP server.

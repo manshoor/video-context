@@ -37,13 +37,16 @@ struct TaskAppTests {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         let paths = try LibraryPaths(root: root)
         let writer = try VideoContextStore(databaseURL: paths.database)
-        let video = VideoRecord(title: "Local task fixture", source: .localFile, sourceValue: "fixture", mediaRelativePath: "video.mp4")
+        let taskProject = try await writer.createFeedbackProject(name: "Task fixture")
+        let video = VideoRecord(title: "Local task fixture", source: .localFile, sourceValue: "fixture", mediaRelativePath: "video.mp4", projectID: taskProject.id)
         try await writer.createVideo(video)
         try await writer.publishArtifacts(videoID: video.id, transcript: [.init(videoID: video.id, start: 0, end: 1, originalText: "Change label")], evidence: [], brief: .init(videoID: video.id, markdown: "Change label"))
         let local = TaskGenerationGate(), cloud = NoCloudTaskHTTP()
         let model = AppModel(cloudHTTP: cloud, localHTTP: local, libraryRoot: root, showsDockActivity: false)
         model.analysisProvider = .lmStudio; model.lmStudioModelID = "vision"; model.lmStudioURL = "http://127.0.0.1:1234"; model.lmStudioUsesToken = false
         model.apiKey = ""; model.credentialState = .missing
+        model.selectedProjectID = taskProject.id
+        model.selectedVideoID = video.id
         await model.loadLibrary()
         model.generateTasks()
         let work = try #require(model.taskGenerationTask)
@@ -64,11 +67,14 @@ struct TaskAppTests {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         let paths = try LibraryPaths(root: root), local = TaskGenerationGate()
         let writer = try VideoContextStore(databaseURL: paths.database)
-        let video = VideoRecord(title: "Cancel fixture", source: .localFile, sourceValue: "fixture", mediaRelativePath: "video.mp4")
+        let taskProject = try await writer.createFeedbackProject(name: "Task fixture")
+        let video = VideoRecord(title: "Cancel fixture", source: .localFile, sourceValue: "fixture", mediaRelativePath: "video.mp4", projectID: taskProject.id)
         try await writer.createVideo(video)
         try await writer.publishArtifacts(videoID: video.id, transcript: [.init(videoID: video.id, start: 0, end: 1, originalText: "Change label")], evidence: [], brief: .init(videoID: video.id, markdown: "Change label"))
         let model = AppModel(localHTTP: local, libraryRoot: root, showsDockActivity: false)
         model.analysisProvider = .lmStudio; model.lmStudioModelID = "vision"; model.lmStudioURL = "http://127.0.0.1:1234"; model.lmStudioUsesToken = false
+        model.selectedProjectID = taskProject.id
+        model.selectedVideoID = video.id
         await model.loadLibrary(); model.generateTasks()
         let work = try #require(model.taskGenerationTask)
         await local.waitForInference(); model.cancelProcessing()

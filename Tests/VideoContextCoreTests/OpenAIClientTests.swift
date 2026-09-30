@@ -78,6 +78,50 @@ struct OpenAIClientTests {
         #expect(format["strict"] as? Bool == true)
     }
 
+    @Test("Brief requests carry the configured reasoning effort")
+    func briefRequestCarriesReasoningEffort() throws {
+        let request = try OpenAIRequestBuilder.analysis(
+            apiKey: "secret-key",
+            model: "gpt-6-sol",
+            prompt: "Evidence",
+            images: [],
+            reasoningEffort: .high
+        )
+        let body = try #require(request.httpBody)
+        let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let reasoning = try #require(object["reasoning"] as? [String: Any])
+
+        #expect(reasoning["effort"] as? String == "high")
+    }
+
+    @Test("Accuracy profile routes task, documentation, and review independently")
+    func accuracyProfileRoutesAnalysisStages() throws {
+        var configuration = ModelConfiguration(transcriptionModel: "whisper-1", analysisModel: "gpt-5.6-terra")
+        configuration.applyAccuracyProfile()
+
+        #expect(configuration.analysisProvider == .openAI)
+        #expect(configuration.analysisModel == "gpt-6-sol")
+        #expect(configuration.reasoningEffort == .high)
+        #expect(configuration.taskConfiguration.selectedAnalysisModel == "gpt-6-astra")
+        #expect(configuration.documentationConfiguration.selectedAnalysisModel == "gpt-6-astra")
+        #expect(configuration.reviewConfiguration?.analysisProvider == .claude)
+        #expect(configuration.reviewConfiguration?.selectedAnalysisModel == "claude-opus-5-5")
+    }
+
+    @Test("Claude requests preserve native reasoning effort")
+    func claudeRequestCarriesReasoningEffort() throws {
+        let configuration = ModelConfiguration(
+            analysisProvider: .claude,
+            claudeModel: "claude-opus-5-5",
+            reasoningEffort: .high
+        )
+        let request = try AnalysisAdapter.request(configuration: configuration, credential: "secret-key", prompt: "Evidence", images: [])
+        let body = try #require(request.httpBody)
+        let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let outputConfig = try #require(object["output_config"] as? [String: Any])
+        #expect(outputConfig["effort"] as? String == "high")
+    }
+
     @Test("Provider errors expose the API message")
     func providerErrorsExposeMessage() {
         let data = Data(#"{"error":{"message":"Invalid API key"}}"#.utf8)

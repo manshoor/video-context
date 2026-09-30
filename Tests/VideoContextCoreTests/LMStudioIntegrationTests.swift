@@ -23,7 +23,7 @@ struct LMStudioIntegrationTests {
         let paths = try LibraryPaths(root: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString))
         let frame = paths.root.appending(path: "frame.jpg")
         try Data([1, 2, 3]).write(to: frame)
-        let client = LocalSequenceClient(responses: [HTTPResult(data: Data(#"{"error":{"message":"context length exceeded"}}"#.utf8), statusCode: 400)] + Array(repeating: Self.success, count: 3))
+        let client = LocalSequenceClient(responses: [HTTPResult(data: Data(#"{"error":{"message":"context length exceeded"}}"#.utf8), statusCode: 400)] + Array(repeating: Self.success(), count: 3))
         let generator = LMStudioBriefGenerator(client: client, configuration: .init(modelID: "vision"))
         let output = try await generator.generate(videoID: "vid_a", transcript: [], evidence: [1.0, 20.0].map {
             EvidenceItem(videoID: "vid_a", timestamp: $0, imageRelativePath: "frame.jpg", ocrText: "Visible error", origin: .automatic)
@@ -41,12 +41,66 @@ struct LMStudioIntegrationTests {
 
     @Test func missingEvidenceImageDoesNotSilentlyBecomeTextOnly() async throws {
         let paths = try LibraryPaths(root: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString))
-        let client = LocalSequenceClient(responses: [Self.success])
+        let client = LocalSequenceClient(responses: [Self.success()])
         let generator = LMStudioBriefGenerator(client: client, configuration: .init(modelID: "vision"))
         await #expect(throws: (any Error).self) {
             try await generator.generate(videoID: "vid_a", transcript: [], evidence: [EvidenceItem(videoID: "vid_a", timestamp: 1, imageRelativePath: "missing.jpg", origin: .automatic)], paths: paths)
         }
         #expect(await client.requests.isEmpty)
+    }
+
+    @Test("LM Studio reduction checkpoints block a repeated unknown request")
+    func reductionCheckpointProtectsLostProviderResult() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "VideoContextLMReduction-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let paths = try LibraryPaths(root: root)
+        let store = try VideoContextStore(databaseURL: paths.database)
+        let video = VideoRecord(id: "vid_lm_reduction", title: "Reduction", source: .localFile,
+                                sourceValue: "fixture.mp4", mediaRelativePath: "videos/vid_lm_reduction/video.mp4")
+        try await store.createVideo(video)
+
+        let initial = Self.success(markdown: String(repeating: "A", count: 2_000))
+        let reduction = Self.success(markdown: "Reduced evidence")
+        let client = LocalSequenceClient(responses: [initial, reduction, .init(data: Data(), statusCode: 503)])
+        let transcript = [TranscriptSegment(videoID: video.id, start: 0, end: 1, originalText: "A requirement")]
+        let generator = LMStudioBriefGenerator(
+            client: client,
+            configuration: .init(modelID: "vision"),
+            contextLength: 13_312,
+            checkpointStore: store
+        )
+        await #expect(throws: (any Error).self) {
+            try await generator.generate(
+                videoID: video.id,
+                transcript: transcript,
+                evidence: [], paths: paths
+            )
+        }
+
+        let checkpoints = try await store.processingCheckpoints(videoID: video.id)
+        let reductionCheckpoints = checkpoints.filter { $0.stage == .analysisBatch && $0.itemKey.hasPrefix("reduction-") }
+        let completed = try #require(reductionCheckpoints.first(where: { $0.state == .completed }))
+        let unknown = try #require(reductionCheckpoints.first(where: { $0.state == .unknown }))
+        #expect(completed.outputData != nil)
+        #expect(unknown.outputData == nil)
+        #expect(await client.requests.count == 3)
+
+        let retryClient = RejectingProviderClient()
+        let retryGenerator = LMStudioBriefGenerator(
+            client: retryClient,
+            configuration: .init(modelID: "vision"),
+            contextLength: 13_312,
+            checkpointStore: store
+        )
+        await #expect(throws: ProcessingRecoveryError.unknownOutcome(
+            videoID: video.id, stage: .analysisBatch, itemKey: unknown.itemKey
+        )) {
+            try await retryGenerator.generate(
+                videoID: video.id,
+                transcript: transcript,
+                evidence: [], paths: paths
+            )
+        }
+        #expect(await retryClient.calls == 0)
     }
 
     @Test func cancellationStopsBeforePublishingOrAnotherRequest() async throws {
@@ -58,7 +112,7 @@ struct LMStudioIntegrationTests {
         }
         await client.waitForRequest()
         task.cancel()
-        await client.release(Self.success)
+        await client.release(Self.success())
         await #expect(throws: CancellationError.self) { try await task.value }
         #expect(await client.calls == 1)
     }
@@ -70,7 +124,7 @@ struct LMStudioIntegrationTests {
         try await store.createVideo(video)
         try await store.replaceTranscript(videoID: video.id, segments: [TranscriptSegment(videoID: video.id, start: 0, end: 1, originalText: "Local transcript")], provenance: .init(provider: .localWhisper, model: "turbo"))
         try await store.publishBrief(videoID: video.id, brief: BriefDocument(videoID: video.id, markdown: "Local brief"), provenance: .init(provider: .lmStudio, model: "vision"))
-        let client = APIUsageRecordingClient(base: LocalSequenceClient(responses: [Self.success]), store: store, videoID: video.id, transcriptionModel: "turbo", analysisModel: "vision", provider: .lmStudio)
+        let client = APIUsageRecordingClient(base: LocalSequenceClient(responses: [Self.success()]), store: store, videoID: video.id, transcriptionModel: "turbo", analysisModel: "vision", provider: .lmStudio)
         _ = try await client.data(for: LMStudioRequestBuilder.analysis(configuration: .init(modelID: "vision"), token: "", prompt: "test", images: []))
         let reader = try VideoContextStore(databaseURL: paths.database, access: .readOnly)
         let snapshot = try #require(try await reader.videoSnapshot(id: video.id))
@@ -102,7 +156,12 @@ struct LMStudioIntegrationTests {
         #expect(snapshot.apiUsage.first?.provider == .openAI)
     }
 
-    static let success = HTTPResult(data: Data(#"{"choices":[{"finish_reason":"stop","message":{"content":"{\"markdown\":\"Evidence [00:01]\"}"}}],"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}}"#.utf8), statusCode: 200)
+    static func success(markdown: String = "Evidence [00:01]") -> HTTPResult {
+        HTTPResult(
+            data: Data("{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"{\\\"markdown\\\":\\\"\(markdown)\\\"}\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4,\"total_tokens\":16}}".utf8),
+            statusCode: 200
+        )
+    }
 }
 
 private actor LocalSequenceClient: HTTPDataLoading {
@@ -124,4 +183,17 @@ private actor CancellationGateClient: HTTPDataLoading {
     }
     func waitForRequest() async { while continuation == nil { await Task.yield() } }
     func release(_ result: HTTPResult) { continuation?.resume(returning: result); continuation = nil }
+}
+
+private enum ReductionProviderFailure: Error {
+    case lostResponse
+}
+
+private actor RejectingProviderClient: HTTPDataLoading {
+    private(set) var calls = 0
+
+    func data(for request: URLRequest) async throws -> HTTPResult {
+        calls += 1
+        throw ReductionProviderFailure.lostResponse
+    }
 }

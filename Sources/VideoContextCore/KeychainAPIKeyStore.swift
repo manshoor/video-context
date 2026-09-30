@@ -8,7 +8,7 @@ public enum KeychainError: Error, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .interactionNotAllowed: "Unlock the login Keychain to load the OpenAI API key."
+        case .interactionNotAllowed: "Unlock the login Keychain to load the saved API credential."
         case .unexpectedStatus(let status): "Keychain operation failed with status \(status)."
         }
     }
@@ -28,7 +28,7 @@ public struct KeychainAPIKeyStore: APIKeyStoring, Sendable {
         let context = LAContext()
         context.localizedReason = account == "lm-studio-token"
             ? "Video Context needs the saved LM Studio token for local processing."
-            : "Video Context needs the saved OpenAI API key to resume video processing."
+            : "Video Context needs the saved API key for the selected provider."
         context.interactionNotAllowed = mode == .nonInteractive
         let data = try Self.read(
             service: service,

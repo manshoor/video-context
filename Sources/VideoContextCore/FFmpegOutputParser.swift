@@ -1,6 +1,15 @@
 import Foundation
 
 public enum FFmpegOutputParser {
+    public static func firstFrameTimestamp(_ output: String) -> TimeInterval? {
+        let pattern = #"pts_time:([0-9]+(?:\.[0-9]+)?)"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        guard let match = expression.firstMatch(in: output, range: range),
+              let valueRange = Range(match.range(at: 1), in: output) else { return nil }
+        return TimeInterval(output[valueRange])
+    }
+
     public static func sceneTimestamps(_ output: String, minimumSeparation: TimeInterval = 1) -> [TimeInterval] {
         let pattern = #"pts_time:([0-9]+(?:\.[0-9]+)?)"#
         guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }

@@ -60,10 +60,15 @@ struct TaskProposalSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var busy = false
     @State private var failure: String?
+    @State private var showGenerationUsage = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Review proposed \(proposal.kind.rawValue)").font(.title2.bold())
             Text("Applying changes keeps the task ID and clears its review. Your previous revisions remain in local history.").font(.callout)
+            if proposal.generationRunID != nil {
+                Button("View generation usage", systemImage: "chart.bar.xaxis") { showGenerationUsage = true }
+                Text("Shared usage for all proposals from this generation run.").font(.caption).foregroundStyle(.secondary)
+            }
             HSplitView {
                 if let existing { ScrollView { VStack(alignment: .leading) { Text("Current task").font(.title3); TaskContentSummary(content: existing.content) }.padding() }.frame(minWidth: 260) }
                 ScrollView {
@@ -83,6 +88,9 @@ struct TaskProposalSheet: View {
                 Button(proposal.kind == .addition ? "Add task" : "Apply proposal") { resolve(apply: true) }.buttonStyle(.borderedProminent)
             }.disabled(busy)
         }.padding(20).frame(minWidth: 700, idealWidth: 1000, minHeight: 550, idealHeight: 700)
+        .sheet(isPresented: $showGenerationUsage) {
+            AIUsageView(model: model, scope: .init(videoID: proposal.videoID, runID: proposal.generationRunID))
+        }
     }
     private func resolve(apply: Bool, keep: Bool = false) {
         busy = true

@@ -72,16 +72,18 @@ public struct VideoFrameProvider: Sendable {
             .appending(path: "video-context-frame-\(UUID().uuidString).jpg")
         defer { try? FileManager.default.removeItem(at: outputURL) }
         var arguments = [
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-ss", String(format: "%.3f", timestamp),
+            "-hide_banner", "-loglevel", "info", "-y",
             "-i", videoURL.path,
+            "-ss", String(format: "%.3f", timestamp),
             "-frames:v", "1"
         ]
         if let crop {
             arguments.append(contentsOf: [
                 "-vf",
-                "crop=iw*\(crop.width):ih*\(crop.height):iw*\(crop.x):ih*\(crop.y)"
+                "crop=iw*\(crop.width):ih*\(crop.height):iw*\(crop.x):ih*\(crop.y),showinfo"
             ])
+        } else {
+            arguments.append(contentsOf: ["-vf", "showinfo"])
         }
         arguments.append(contentsOf: ["-q:v", "2", outputURL.path])
 
@@ -91,6 +93,10 @@ public struct VideoFrameProvider: Sendable {
               data.isEmpty == false else {
             throw VideoFrameError.frameUnavailable
         }
-        return VideoFrame(data: data, mimeType: "image/jpeg", actualTimestamp: timestamp)
+        return VideoFrame(
+            data: data,
+            mimeType: "image/jpeg",
+            actualTimestamp: FFmpegOutputParser.firstFrameTimestamp(output.text) ?? timestamp
+        )
     }
 }

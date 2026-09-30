@@ -13,6 +13,7 @@ struct MCPContextServiceTests {
             evidence: [],
             brief: BriefDocument(videoID: fixture.videoID, markdown: words)
         )
+        _ = try await fixture.store.saveAudioCoverage(videoID: fixture.videoID, hasAudio: false, duration: 30)
         let service = MCPContextService(store: fixture.store)
 
         let first = try await service.brief(videoID: fixture.videoID)
@@ -23,6 +24,9 @@ struct MCPContextServiceTests {
         #expect(second.markdown.split(whereSeparator: \Character.isWhitespace).count == 20)
         #expect(second.nextCursor == nil)
         #expect(first.revisions.isBriefStale == false)
+        #expect(first.audioCoverage?.status == .silent)
+        #expect(first.audioCoverage?.hasAudio == false)
+        #expect(first.audioCoverage?.duration == 30)
     }
 
     @Test("Segment retrieval returns transcript and screenshot evidence in the same time range")

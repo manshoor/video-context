@@ -5,9 +5,21 @@ import VideoContextCore
 
 @MainActor
 struct ImportActivityTests {
+    @Test func linkedEvidenceImportKeepsTheSelectedRecording() async throws {
+        let gate = ImportGate()
+        let model = try await modelWith(gate: gate)
+        model.selectedVideoID = "vid_parent"
+        let job = Task { await model.importOnline("https://example.com/evidence.mp4", selectImported: false) }
+        await gate.waitForStart()
+        #expect(model.selectedVideoID == "vid_parent")
+        await gate.release()
+        let importedID = try #require(await job.value)
+        #expect(importedID != "vid_parent")
+        #expect(model.selectedVideoID == "vid_parent")
+    }
     @Test func localImportShowsWorkRejectsOverlapAndStopsAfterCancellation() async throws {
         let gate = ImportGate()
-        let model = try modelWith(gate: gate)
+        let model = try await modelWith(gate: gate)
         let importTask = Task { await model.importLocal(URL(fileURLWithPath: "/tmp/example.mp4")) }
         await gate.waitForStart()
         #expect(model.activity?.phase == .copying)
@@ -30,7 +42,7 @@ struct ImportActivityTests {
 
     @Test func failedDownloadClearsActivityAndPreservesItsRecording() async throws {
         let gate = ImportGate(fails: true)
-        let model = try modelWith(gate: gate)
+        let model = try await modelWith(gate: gate)
         let task = Task { await model.importOnline("https://example.com/video.mp4") }
         await gate.waitForStart()
         #expect(model.activity?.phase == .downloading)
@@ -45,7 +57,7 @@ struct ImportActivityTests {
 
     @Test func completedImportWithMissingCredentialsDoesNotShowProcessing() async throws {
         let gate = ImportGate()
-        let model = try modelWith(gate: gate)
+        let model = try await modelWith(gate: gate)
         model.credentialState = .missing
         let task = Task { await model.importLocal(URL(fileURLWithPath: "/tmp/example.mp4")) }
         await gate.waitForStart()
@@ -57,17 +69,21 @@ struct ImportActivityTests {
         #expect(model.errorMessage?.contains("API key") == true)
     }
 
-    private func modelWith(gate: ImportGate) throws -> AppModel {
+    private func modelWith(gate: ImportGate) async throws -> AppModel {
         let root = FileManager.default.temporaryDirectory.appending(path: "VideoContextImportTests-\(UUID())")
-        return AppModel(libraryRoot: root, mediaImports: MediaImportOperations(
+        let model = AppModel(libraryRoot: root, mediaImports: MediaImportOperations(
             local: { _, id, paths in try await gate.run(destination: paths.root.appending(path: "\(id).mp4")) },
             online: { _, id, paths, _ in try await gate.run(destination: paths.root.appending(path: "\(id).mp4")) }
         ), showsDockActivity: false)
+        let store = try #require(model.store)
+        let project = try await store.createFeedbackProject(name: "Import test")
+        model.selectedProjectID = project.id
+        return model
     }
 
     @Test func cancellingDuringUninterruptibleCopyKeepsImportedMediaPaused() async throws {
         let gate = ImportGate(checksCancellation: false)
-        let model = try modelWith(gate: gate)
+        let model = try await modelWith(gate: gate)
         let task = Task { await model.importLocal(URL(fileURLWithPath: "/tmp/example.mp4")) }
         await gate.waitForStart()
         let id = model.activity?.videoID

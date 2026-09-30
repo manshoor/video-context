@@ -72,9 +72,7 @@ struct VideoWorkspaceView: View {
         .onAppear { configureForSnapshot() }
         .onChange(of: snapshot.video.id) { _, _ in configureForSnapshot() }
         .onChange(of: model.seekRequest) { _, request in
-            guard let request else { return }
-            playbackPosition = request.timestamp
-            player?.seek(to: CMTime(seconds: request.timestamp, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            applySeek(request)
         }
         .task(id: snapshot.video.id) {
             while !Task.isCancelled {
@@ -97,6 +95,13 @@ struct VideoWorkspaceView: View {
         } else {
             player = nil
         }
+        applySeek(model.seekRequest)
+    }
+
+    private func applySeek(_ request: SeekRequest?) {
+        guard let request, request.videoID == snapshot.video.id else { return }
+        playbackPosition = request.timestamp
+        player?.seek(to: CMTime(seconds: request.timestamp, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     private func togglePlayback() {

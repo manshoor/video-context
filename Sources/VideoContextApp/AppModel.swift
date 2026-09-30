@@ -7,23 +7,115 @@ import VideoContextCore
 @Observable
 final class AppModel {
     var videos: [VideoRecord] = []
-    var selectedVideoID: String?
+    var feedbackProjects: [FeedbackProject] = []
+    var workspaceLocation = WorkspaceLocation()
+    var projectWorkspace: ProjectWorkspaceSnapshot?
+    var taskDraft: ProjectTaskDraft?
+    var taskDeletion: TaskDeletionPresentation?
+    @ObservationIgnored var taskDeleter: (@Sendable (ProjectTaskDeletionPreview) async throws -> Void)?
+    var documentation = ProjectDocumentationSnapshot()
+    var documentationSources: [ProjectDocumentSource] = []
+    var documentationInboxIssues: [DocumentationInboxIssue] = []
+    var documentationSourceRevision: ProjectDocumentSourceRevision?
+    var documentationDraft: DocumentationDraft?
+    var documentationEvidenceLocator: ProjectDocumentLocator?
+    var documentationEvidence: ProjectEvidenceReference?
+    var libraryReadOnlyReason: String?
+    var documentationBusy = false
+    var documentationProgress: String?
+    var documentationGenerationSources: [ProjectDocumentationGenerationSource] = []
+    @ObservationIgnored var documentationTask: Task<Void, Never>?
+    @ObservationIgnored var documentationSaver: (@Sendable (ProjectDocumentation) async throws -> ProjectDocumentation)?
+    var pendingNavigation: WorkspaceLocation?
+    var sourceReturnLocation: WorkspaceLocation?
+    var pendingSourceTimestamp: Double?
+    var focusedFeedbackCommentID: String?
+    var showUnsavedTaskAlert = false
+    var workspaceLoadError: String?
+    @ObservationIgnored var workspaceLoadTask: Task<Void, Never>?
+    @ObservationIgnored var sourceNavigationTask: Task<Void, Never>?
+    @ObservationIgnored var workspaceLoadID = UUID()
+    @ObservationIgnored var projectWorkspaceLoader: (@Sendable (String?) async throws -> ProjectWorkspaceSnapshot)?
+    var selectedVideoID: String? {
+        get {
+            if case .recording(let id, _) = workspaceLocation.task { return id }
+            return workspaceLocation.recordingID
+        }
+        set { workspaceLocation.recordingID = newValue }
+    }
+    var selectedProjectID: String? {
+        get { workspaceLocation.projectID }
+        set { workspaceLocation.root = newValue.map(WorkspaceLocation.Root.project) ?? .inbox }
+    }
     var snapshot: VideoSnapshot?
     var taskLibrary: TaskLibrarySnapshot?
+    var feedbackBatches: [FeedbackBatch] = []
+    var unassignedFeedbackBatches: [FeedbackBatch] = []
+    var feedbackScopeVideoID: String?
+    var feedbackScopeProjectID: String?
+    var selectedFeedbackID: String? {
+        get {
+            if case .feedback(let id, _) = workspaceLocation.task { return id }
+            return workspaceLocation.feedbackID
+        }
+        set { workspaceLocation.feedbackID = newValue }
+    }
+    var feedbackSnapshot: FeedbackSnapshot?
+    var feedbackCreationBusy = false
+    var sourceWorkCount = 0
+    var editingFeedbackIDs: Set<String> = []
+    var feedbackBusy = false
+    var feedbackProgress: String?
+    @ObservationIgnored var feedbackGenerationTask: Task<Void, Never>?
     var taskGenerationMessage: String?
+    var taskGenerationVideoID: String?
     @ObservationIgnored var taskGenerationTask: Task<Void, Never>?
+    var diagnosticsEnabled = false
+    var diagnosticsExpiry: Date?
+    var diagnosticsHealth = "Logging is off."
+    @ObservationIgnored let diagnostics: DiagnosticsService?
+    @ObservationIgnored var diagnosticsStarted = false
+    @ObservationIgnored var diagnosticStartupFailure: DiagnosticFailure?
+    @ObservationIgnored var diagnosticExpiryTask: Task<Void, Never>?
+    @ObservationIgnored var diagnosticHeartbeat: Task<Void, Never>?
+    @ObservationIgnored var diagnosticActivityScope: DiagnosticScope?
     var errorMessage: String?
+    var isSavingSettings = false
+    var settingsSaveError: String?
+    var settingsSaved = false
+    var usagePresentation: UsagePresentation?
+    var usageRevision = 0
+    var usageStorageError: String?
+    var claudeModel: String
+    var deepSeekModel: String
+    var taskAnalysisOverride: AnalysisSelection? { didSet { taskDefaultInherited = false } }
+    var feedbackPreparationOverride: AnalysisSelection? { didSet { preparationDefaultInherited = false } }
+    var documentationAnalysisOverride: AnalysisSelection?
+    var reviewAnalysisOverride: AnalysisSelection?
+    var analysisReasoningEffort: ReasoningEffort?
+    var projectAnalysisWarnings: [String] = []
+    @ObservationIgnored var taskDefaultInherited = false
+    @ObservationIgnored var preparationDefaultInherited = false
+    let claudeCredential: ProviderCredential
+    let deepSeekCredential: ProviderCredential
+    var providerModels: [AnalysisProvider: [String]] = [:]
+    var providerCheckMessage = ""
+    var checkingCloudProvider = false
+    @ObservationIgnored var providerCheckTask: Task<Void, Never>?
+    @ObservationIgnored let providerHTTP: AnyHTTPDataLoader
     var processingVideoID: String?
     var seekRequest: SeekRequest?
     var processingProgress: ProcessingProgress?
     var processingElapsedSeconds = 0
-    var credentialState: CredentialState = .loading
+    var credentialState: CredentialState = .loading { didSet { diagnosticCredentialChanged(credentialState) } }
     var lastCopiedLabel: String?
     var activity: AppActivity? {
-        didSet { dockActivity.update(activity) }
+        didSet { dockActivity.update(activity); syncDiagnosticHeartbeat() }
     }
     var savingFrameVideoID: String?
     let isUIFixture: Bool
+    let jamSettings: JamSettingsModel
+    @ObservationIgnored let jamTools: any JamToolCalling
 
     var ytDLPPath: String
     var ffmpegPath: String
@@ -32,12 +124,19 @@ final class AppModel {
     var analysisModel: String
     var apiKey: String
     var transcriptionProvider: TranscriptionProvider
-    var analysisProvider: AnalysisProvider
+    var analysisProvider: AnalysisProvider {
+        didSet {
+            if analysisProvider != .openAI {
+                if taskDefaultInherited { taskAnalysisOverride = nil }
+                if preparationDefaultInherited { feedbackPreparationOverride = nil }
+            }
+        }
+    }
     var lmStudioURL: String
     var lmStudioModelID: String
     var lmStudioUsesToken: Bool
     var lmStudioToken = ""
-    var lmTokenState: CredentialState = .missing
+    var lmTokenState: CredentialState = .missing { didSet { diagnosticCredentialChanged(lmTokenState) } }
     var localModels: [LMStudioModel] = []
     var localConnectionMessage = "Start LM Studio’s server in the Developer tab, then refresh models."
     var checkingLocalModel = false
@@ -56,9 +155,21 @@ final class AppModel {
     @ObservationIgnored var speechModels: SpeechModelManager?
 
     var modelConfiguration: ModelConfiguration {
-        ModelConfiguration(transcriptionModel: transcriptionModel, analysisModel: analysisModel,
+        var configuration = ModelConfiguration(transcriptionModel: transcriptionModel, analysisModel: analysisModel,
             transcriptionProvider: transcriptionProvider, analysisProvider: analysisProvider,
-            lmStudio: .init(baseURL: lmStudioURL, modelID: lmStudioModelID))
+            lmStudio: .init(baseURL: lmStudioURL, modelID: lmStudioModelID), claudeModel: claudeModel, deepSeekModel: deepSeekModel,
+            taskAnalysisOverride: taskAnalysisOverride, feedbackPreparationOverride: feedbackPreparationOverride)
+        configuration.reasoningEffort = [.openAI, .claude].contains(analysisProvider) ? analysisReasoningEffort : nil
+        configuration.documentationAnalysisOverride = documentationAnalysisOverride
+        configuration.reviewAnalysisOverride = reviewAnalysisOverride
+        return configuration
+    }
+    var selectedAnalysisProviders: Set<AnalysisProvider> {
+        let configuration = modelConfiguration
+        return Set([configuration.analysisProvider, configuration.taskConfiguration.analysisProvider,
+                    configuration.feedbackPreparationConfiguration.analysisProvider,
+                    configuration.documentationConfiguration.analysisProvider] +
+                   [configuration.reviewConfiguration?.analysisProvider].compactMap { $0 })
     }
     var selectionNeedsOpenAI: Bool {
         modelConfiguration.requiresOpenAI(transcriptNeeded: snapshot?.transcript.isEmpty ?? true)
@@ -66,9 +177,11 @@ final class AppModel {
 
     @ObservationIgnored let paths: LibraryPaths?
     @ObservationIgnored let store: VideoContextStore?
+    @ObservationIgnored private let preferencesDefaults: UserDefaults
     @ObservationIgnored private let keyStore: any APIKeyStoring
     @ObservationIgnored private let credentialLoader: CredentialLoader
     @ObservationIgnored private var processingTask: Task<Void, Never>?
+    @ObservationIgnored private var feedbackRecoveryRunning = false
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var credentialLoadTask: Task<Void, Never>?
     @ObservationIgnored private var credentialTimeoutTask: Task<Void, Never>?
@@ -82,17 +195,33 @@ final class AppModel {
     @ObservationIgnored private var clipboardTask: Task<Void, Never>?
 
     init(keyStore: any APIKeyStoring = KeychainAPIKeyStore(), localTokenStore: any APIKeyStoring = KeychainAPIKeyStore(account: "lm-studio-token"),
+         claudeKeyStore: any APIKeyStoring = KeychainAPIKeyStore(account: "claude-api-key"), deepSeekKeyStore: any APIKeyStoring = KeychainAPIKeyStore(account: "deepseek-api-key"),
          cloudHTTP: any HTTPDataLoading = URLSessionHTTPClient(), localHTTP: any HTTPDataLoading = LoopbackHTTPClient(), libraryRoot: URL? = nil,
-         mediaImports: MediaImportOperations = .live, showsDockActivity: Bool = true, isUIFixture: Bool = false) {
+         mediaImports: MediaImportOperations = .live, preferencesDefaults: UserDefaults = .standard, showsDockActivity: Bool = true, isUIFixture: Bool = false,
+         jamController: (any JamConnectionControlling)? = nil) {
         self.isUIFixture = isUIFixture
+        if let jamController {
+            jamSettings = JamSettingsModel(controller: jamController)
+            jamTools = (jamController as? any JamToolCalling) ?? UnavailableJamToolClient()
+        } else if isUIFixture {
+            jamSettings = JamSettingsModel(controller: FixtureJamConnection())
+            jamTools = UnavailableJamToolClient()
+        } else {
+            let jamService = JamLiveConnection.makeService()
+            jamSettings = JamSettingsModel(controller: jamService)
+            jamTools = jamService
+        }
         self.mediaImports = mediaImports
         dockActivity = DockActivityController(enabled: showsDockActivity)
-        self.cloudHTTP = AnyHTTPDataLoader(cloudHTTP)
-        self.localHTTP = AnyHTTPDataLoader(localHTTP)
+        self.cloudHTTP = AnyHTTPDataLoader(DiagnosticHTTPClient(base: AnyHTTPDataLoader(cloudHTTP), provider: .openAI))
+        self.localHTTP = AnyHTTPDataLoader(DiagnosticHTTPClient(base: AnyHTTPDataLoader(localHTTP), provider: .lmStudio))
+        providerHTTP = AnyHTTPDataLoader(cloudHTTP)
+        claudeCredential = ProviderCredential(store: claudeKeyStore); deepSeekCredential = ProviderCredential(store: deepSeekKeyStore)
         self.localTokenStore = localTokenStore
         self.keyStore = keyStore
         credentialLoader = CredentialLoader(store: keyStore)
-        let preferences = StoredPreferences.load()
+        self.preferencesDefaults = preferencesDefaults
+        let preferences = StoredPreferences.load(from: preferencesDefaults)
         ytDLPPath = preferences.toolchain.ytDLP
         ffmpegPath = preferences.toolchain.ffmpeg
         ffprobePath = preferences.toolchain.ffprobe
@@ -103,33 +232,55 @@ final class AppModel {
         lmStudioURL = preferences.models.lmStudio.baseURL
         lmStudioModelID = preferences.models.lmStudio.modelID
         lmStudioUsesToken = preferences.lmStudioUsesToken ?? false
+        claudeModel = preferences.models.claudeModel
+        deepSeekModel = preferences.models.deepSeekModel
+        documentationAnalysisOverride = preferences.models.documentationAnalysisOverride
+        reviewAnalysisOverride = preferences.models.reviewAnalysisOverride
+        analysisReasoningEffort = preferences.models.reasoningEffort
+        taskAnalysisOverride = preferences.taskUsesAnalysisSettings == true ? nil : preferences.models.taskAnalysisOverride ??
+            (preferences.models.analysisProvider == .openAI ? .init(provider: .openAI, modelID: "gpt-6-sol", effort: .medium) : nil)
+        feedbackPreparationOverride = preferences.preparationUsesAnalysisSettings == true ? nil : preferences.models.feedbackPreparationOverride ??
+            (preferences.models.analysisProvider == .openAI ? .init(provider: .openAI, modelID: "gpt-6-luna", effort: .medium) : nil)
+        taskDefaultInherited = preferences.taskDefaultInherited ??
+            (preferences.taskUsesAnalysisSettings != true && preferences.models.taskAnalysisOverride == nil && preferences.models.analysisProvider == .openAI)
+        preparationDefaultInherited = preferences.preparationDefaultInherited ??
+            (preferences.preparationUsesAnalysisSettings != true && preferences.models.feedbackPreparationOverride == nil && preferences.models.analysisProvider == .openAI)
         apiKey = ""
 
         var loadedPaths: LibraryPaths?
         var loadedStore: VideoContextStore?
         var loadError: String?
+        var loadFailure: DiagnosticFailure?
         do {
             let root = libraryRoot ?? (isUIFixture ? FileManager.default.temporaryDirectory.appending(path: "VideoContextUI-\(UUID())") : nil)
             let libraryPaths = try root.map { try LibraryPaths(root: $0) } ?? LibraryPaths.applicationSupport()
             loadedPaths = libraryPaths
             loadedStore = try VideoContextStore(databaseURL: libraryPaths.database)
         } catch {
+            loadFailure = DiagnosticFailure(error)
             loadError = "The local library could not be opened: \(error.localizedDescription)"
+            if let loadedPaths, let readable = try? VideoContextStore(databaseURL: loadedPaths.database, access: .readOnly) {
+                loadedStore = readable
+                libraryReadOnlyReason = "Library upgrade could not finish. Your existing library is open for reading. Check free disk space and library permissions, then restart. \(error.localizedDescription)"
+                loadError = nil
+            }
         }
         speechModels = loadedPaths.map { SpeechModelManager(root: $0.root.appending(path: "models")) }
+        diagnostics = loadedPaths.map { .library($0, component: .app) }
         paths = loadedPaths
         store = loadedStore
+        diagnosticStartupFailure = loadFailure
         errorMessage = loadError
     }
 
-    var isProcessing: Bool { activity != nil }
+    var isProcessing: Bool { activity != nil || checkingCloudProvider || checkingLocalModel }
 
     var credentialStatusText: String {
         switch credentialState {
         case .loading: "Checking Keychain for the OpenAI API key…"
         case .ready: "OpenAI API key is ready."
-        case .missing: "Enter an OpenAI API key before processing."
-        case .accessRequired: "Unlock the login Keychain to resume processing."
+        case .missing: "No OpenAI key was loaded. Try Load saved key before entering it again."
+        case .accessRequired: "Allow Keychain access to load the saved key; you do not need to enter it again."
         case .failed(let message): "API key access failed: \(message)"
         }
     }
@@ -166,25 +317,38 @@ final class AppModel {
     }
 
     func loadLibrary(resume: Bool = false) async {
+        if resume {
+            await startDiagnostics()
+            do { try await store?.recoverInterruptedUsageRuns() }
+            catch { usageStorageError = "Could not reconcile interrupted AI usage. Accounting may be incomplete." }
+        }
         guard let store else { return }
         do {
             videos = try await store.listVideos(limit: 100).items
-            if selectedVideoID == nil { selectedVideoID = videos.first?.id }
+            feedbackProjects = try await store.listFeedbackProjects()
+            if resume, selectedVideoID == nil, selectedProjectID == nil, let first = feedbackProjects.first {
+                workspaceLocation.root = .project(first.id)
+            }
             await loadSelection()
             if resume, didAttemptResume == false {
                 didAttemptResume = true
                 if isUIFixture {
                     credentialState = .ready
                     await installUIFixture()
-                } else {
+                } else if libraryReadOnlyReason == nil {
+                    if let paths { _ = await store.resumePendingDocumentImports(paths: paths) }
+                    await recoverFeedbackImports()
                     await refreshSpeechModelStatus()
-                    if transcriptionProvider == .openAI || analysisProvider == .openAI {
+                    if transcriptionProvider == .openAI || selectedAnalysisProviders.contains(.openAI) {
                         startCredentialLoad(mode: .nonInteractive)
                     } else {
                         credentialState = .missing
                         if !lmStudioUsesToken { resumeFirstIncompleteRecording() }
                     }
                     if lmStudioUsesToken { Task { await loadLocalToken(mode: .nonInteractive) } }
+                    for provider in selectedAnalysisProviders where provider == .claude || provider == .deepSeek {
+                        Task { await loadProviderCredential(provider, mode: .nonInteractive) }
+                    }
                 }
             }
         } catch {
@@ -192,69 +356,71 @@ final class AppModel {
         }
     }
 
-    func loadSelection() async {
-        guard let store, let selectedVideoID else {
-            snapshot = nil
-            taskLibrary = nil
-            return
-        }
-        do {
-            let loaded = try await store.videoSnapshot(id: selectedVideoID)
-            guard self.selectedVideoID == selectedVideoID else { return }
-            guard let loaded else { snapshot = nil; taskLibrary = nil; return }
-            let tasks = try await store.taskSnapshot(videoID: selectedVideoID)
-            guard self.selectedVideoID == selectedVideoID else { return }
-            snapshot = loaded
-            taskLibrary = tasks
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
+    func loadSelection() async { await loadProjectSelection() }
 
-    func importLocal(_ source: URL) async {
-        guard !isProcessing, let paths, let store else { return }
+    @discardableResult func importLocal(_ source: URL, selectImported: Bool = true, projectID: String? = nil, onImported: (@MainActor @Sendable (String) async throws -> Void)? = nil) async -> String? {
+        guard libraryReadOnlyReason == nil else { errorMessage = libraryReadOnlyReason; return nil }
+        guard !isProcessing, let paths, let store else { return nil }
+        guard let destinationProjectID = projectID ?? selectedProjectID else {
+            errorMessage = "Choose a project before importing a recording."; return nil
+        }
+        let importLocation = workspaceLocation
         let hasAccess = source.startAccessingSecurityScopedResource()
         defer { if hasAccess { source.stopAccessingSecurityScopedResource() } }
         let videoID = VideoRecord(title: "", source: .localFile, sourceValue: "", mediaRelativePath: "").id
         activity = AppActivity(videoID: videoID, recordingTitle: source.deletingPathExtension().lastPathComponent, phase: .copying)
         let task = Task {
-          do {
-            let destination = try await mediaImports.local(source, videoID, paths)
-            let record = VideoRecord(
-                id: videoID,
-                title: source.deletingPathExtension().lastPathComponent,
-                source: .localFile,
-                sourceValue: source.path,
-                mediaRelativePath: paths.relativePath(for: destination)
-            )
-            try await store.createVideo(record)
-            selectedVideoID = videoID
-            await loadLibrary()
-            try Task.checkCancellation()
-            activity = nil
-            beginProcessing(videoID: videoID)
-          } catch is CancellationError {
-            try? await store.updateVideo(id: videoID, status: .cancelled, errorMessage: "Import stopped. The completed copy is saved; resume when ready.")
-            activity = nil
-            await loadLibrary()
-          } catch {
-            activity = nil
-            errorMessage = error.localizedDescription
-          }
+            await runDiagnosed(.importLocal, videoID: videoID) {
+                do {
+                  let destination = try await mediaImports.local(source, videoID, paths)
+                  let record = VideoRecord(
+                      id: videoID,
+                      title: source.deletingPathExtension().lastPathComponent,
+                      source: .localFile,
+                      sourceValue: source.path,
+                      mediaRelativePath: paths.relativePath(for: destination), projectID: destinationProjectID
+                  )
+                  try await store.createVideo(record)
+                  try await onImported?(videoID)
+                  if selectImported && workspaceLocation == importLocation {
+                      workspaceLocation.section = .recordings; workspaceLocation.recordingID = videoID; workspaceLocation.task = nil
+                  }
+                  await loadLibrary()
+                  try Task.checkCancellation()
+                  activity = nil
+                  beginProcessing(videoID: videoID)
+                  await DiagnosticTrace.record(.completed)
+                } catch is CancellationError {
+                  await DiagnosticTrace.record(.cancelled)
+                  try? await store.updateVideo(id: videoID, status: .cancelled, errorMessage: "Import stopped. The completed copy is saved; resume when ready.")
+                  activity = nil
+                  await loadLibrary()
+                } catch {
+                  await DiagnosticTrace.record(.failed, error: error)
+                  activity = nil
+                  errorMessage = error.localizedDescription
+                }
+            }
         }
         importTask = task
         importRequestID = videoID
         await task.value
         if importRequestID == videoID { importTask = nil; importRequestID = nil }
+        return videoID
     }
 
-    func importOnline(_ value: String) async {
-        guard !isProcessing else { return }
+    @discardableResult func importOnline(_ value: String, selectImported: Bool = true, projectID: String? = nil, onImported: (@MainActor @Sendable (String) async throws -> Void)? = nil) async -> String? {
+        guard libraryReadOnlyReason == nil else { errorMessage = libraryReadOnlyReason; return nil }
+        guard !isProcessing else { return nil }
         guard let paths, let store,
               let source = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             errorMessage = MediaImportError.unsupportedURL.localizedDescription
-            return
+            return nil
         }
+        guard let destinationProjectID = projectID ?? selectedProjectID else {
+            errorMessage = "Choose a project before importing a recording."; return nil
+        }
+        let importLocation = workspaceLocation
         let videoID = VideoRecord(title: "", source: .onlineURL, sourceValue: "", mediaRelativePath: "").id
         let provisionalPath = "videos/\(videoID)/video.mp4"
         let title = source.host.map { "Recording from \($0)" } ?? "Online recording"
@@ -263,47 +429,60 @@ final class AppModel {
             title: title,
             source: .onlineURL,
             sourceValue: source.absoluteString,
-            mediaRelativePath: provisionalPath
+            mediaRelativePath: provisionalPath, projectID: destinationProjectID
         )
         activity = AppActivity(videoID: videoID, recordingTitle: title, phase: .downloading)
         let task = Task {
-          do {
-            try await store.createVideo(record)
-            selectedVideoID = videoID
-            await loadLibrary()
-            _ = try await mediaImports.online(source, videoID, paths, ytDLPPath)
-            try Task.checkCancellation()
-            activity = nil
-            beginProcessing(videoID: videoID)
-          } catch is CancellationError {
-            try? await store.updateVideo(id: videoID, status: .cancelled, errorMessage: "Download cancelled. Import the link again to retry.")
-            activity = nil
-            await loadLibrary()
-          } catch {
-            try? await store.updateVideo(id: videoID, status: .failed, errorMessage: error.localizedDescription)
-            activity = nil
-            errorMessage = error.localizedDescription
-            await loadLibrary()
-          }
+            await runDiagnosed(.importOnline, videoID: videoID) {
+                do {
+                  try await store.createVideo(record)
+                  try await onImported?(videoID)
+                  if selectImported && workspaceLocation == importLocation {
+                      workspaceLocation.section = .recordings; workspaceLocation.recordingID = videoID; workspaceLocation.task = nil
+                  }
+                  await loadLibrary()
+                  _ = try await mediaImports.online(source, videoID, paths, ytDLPPath)
+                  try Task.checkCancellation()
+                  activity = nil
+                  beginProcessing(videoID: videoID)
+                  await DiagnosticTrace.record(.completed)
+                } catch is CancellationError {
+                  await DiagnosticTrace.record(.cancelled)
+                  try? await store.updateVideo(id: videoID, status: .cancelled, errorMessage: "Download cancelled. Import the link again to retry.")
+                  activity = nil
+                  await loadLibrary()
+                } catch {
+                  await DiagnosticTrace.record(.failed, error: error)
+                  try? await store.updateVideo(id: videoID, status: .failed, errorMessage: error.localizedDescription)
+                  activity = nil
+                  errorMessage = error.localizedDescription
+                  await loadLibrary()
+                }
+            }
         }
         importTask = task
         importRequestID = videoID
         await task.value
         if importRequestID == videoID { importTask = nil; importRequestID = nil }
+        return videoID
     }
 
     func waitForProcessing() async { await processingTask?.value }
 
     func beginProcessing(videoID: String) {
-        guard !isProcessing, let paths, let store else { return }
+        guard libraryReadOnlyReason == nil else { errorMessage = libraryReadOnlyReason; return }
+        guard !isProcessing, !checkingCloudProvider, let paths, let store else { return }
         if isUIFixture { startUIFixtureActivity(videoID: videoID); return }
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard analysisProvider != .openAI || (credentialState == .ready && !key.isEmpty) else {
-            errorMessage = "Unlock or enter an OpenAI API key in Settings before processing this recording."
+        guard credentialReady(for: analysisProvider) else {
+            errorMessage = "Unlock or enter the \(analysisProvider.label) API key or local token in Settings before processing this recording."
+            Task { await recordDiagnosticFailure(OpenAIClientError.missingAPIKey, operation: .processing, videoID: videoID) }
             return
         }
         let toolchain = MediaToolchain(ytDLP: ytDLPPath, ffmpeg: ffmpegPath, ffprobe: ffprobePath)
         let models = modelConfiguration
+        let analysisCredential = credentialValue(for: models.analysisProvider)
+        let openAIReady = credentialState == .ready
         let localToken = lmStudioToken
         let needsLocalToken = lmStudioUsesToken
         processingVideoID = videoID
@@ -312,65 +491,75 @@ final class AppModel {
         processingElapsedSeconds = 0
         processingTask = Task { [weak self] in
             guard let self else { return }
-            let progress: ProcessingProgressHandler = { [weak self] progress in
-                await self?.receiveProcessingProgress(progress)
+            await self.runDiagnosed(.processing, videoID: videoID) {
+                let progress: ProcessingProgressHandler = { [weak self] progress in
+                    await self?.receiveProcessingProgress(progress)
+                }
+                do {
+                    guard let initial = try await store.videoSnapshot(id: videoID) else { throw VideoContextStoreError.videoNotFound(videoID) }
+                    let media = FFmpegMediaProcessor(toolchain: toolchain, runner: ProcessRunner())
+                    let inspection = try await media.inspect(paths.absoluteURL(relativePath: initial.video.mediaRelativePath))
+                    let transcriptNeeded = initial.transcript.isEmpty && inspection.hasAudio
+                    guard !models.requiresOpenAI(transcriptNeeded: transcriptNeeded) || (openAIReady && !key.isEmpty) else {
+                        throw OpenAIClientError.missingAPIKey
+                    }
+                    try await self.withUsageRun(operation: .processing, videoID: videoID, configuration: models, source: initial.video.revisions) {
+                        let cloudClient = UsageRecordingClient(base: self.cloudHTTP, provider: .openAI, model: models.transcriptionModel, stage: .transcription)
+                        let transcriber: any Transcribing
+                        if !transcriptNeeded { transcriber = SavedTranscriptOnly() }
+                        else if models.transcriptionProvider == .localWhisper {
+                            guard !self.speechDownloadActive else { throw LocalProviderError.configuration("Wait for the speech model download to finish before transcribing locally.") }
+                            guard let manager = self.speechModels else { throw LocalProviderError.configuration("The local model directory is unavailable.") }
+                            transcriber = LocalWhisperTranscriber(assets: try await manager.installedAssets(), store: store, progress: progress)
+                        } else {
+                            transcriber = OpenAITranscriber(client: cloudClient, apiKey: key, model: models.transcriptionModel)
+                        }
+                        var resolved = models
+                        var contextLength = 32_768
+                        if models.analysisProvider == .lmStudio {
+                            guard !needsLocalToken || !localToken.isEmpty else { throw LocalProviderError.configuration("Unlock or enter the LM Studio token in Settings.") }
+                            await progress(.init(stage: .inspecting, detail: "Checking LM Studio"))
+                            let instance = try await LMStudioService(client: self.localHTTP).loadedModel(configuration: models.lmStudio, token: analysisCredential)
+                            resolved.lmStudio.modelID = instance.id; contextLength = instance.config.contextLength
+                        }
+                        let client = UsageRecordingClient(base: self.transport(for: models.analysisProvider), provider: models.analysisProvider.identity, model: models.selectedAnalysisModel, stage: .analysis)
+                        let generator: any BriefGenerating
+                        if models.analysisProvider == .openAI {
+                            generator = OpenAIBriefGenerator(client: client, apiKey: analysisCredential, model: models.analysisModel,
+                                reasoningEffort: models.reasoningEffort, checkpointStore: store)
+                        } else {
+                            generator = StructuredBriefGenerator(client: client, configuration: resolved, credential: analysisCredential, contextLength: contextLength, checkpointStore: store)
+                        }
+                        try Task.checkCancellation()
+                        let pipeline = VideoProcessingPipeline(store: store, paths: paths,
+                            media: FFmpegMediaProcessor(toolchain: toolchain, runner: ProcessRunner()), transcriber: transcriber,
+                            textRecognizer: VisionTextRecognizer(), briefGenerator: generator, progress: progress,
+                            transcriptionIdentity: ProviderIdentity(provider: models.transcriptionProvider == .localWhisper ? .localWhisper : .openAI,
+                                model: models.transcriptionProvider == .localWhisper ? ModelConfiguration.localSpeechModel : models.transcriptionModel),
+                            analysisIdentity: resolved.analysisIdentity)
+                        try await pipeline.process(videoID: videoID)
+                    }
+                    await DiagnosticTrace.record(.completed)
+                } catch is CancellationError {
+                    await DiagnosticTrace.record(.cancelled)
+                    try? await store.updateVideo(id: videoID, status: .cancelled, errorMessage: "Processing was cancelled.")
+                } catch {
+                    await DiagnosticTrace.record(.failed, error: error)
+                    self.errorMessage = error.localizedDescription
+                    try? await store.markIncomplete(videoID: videoID, error: error.localizedDescription)
+                }
+                self.processingVideoID = nil
+                self.activity = nil
+                self.processingProgress = nil
+                self.processingElapsedSeconds = 0
+                self.statusTask?.cancel()
+                await self.loadLibrary()
+                if !self.feedbackRecoveryRunning {
+                    self.feedbackRecoveryRunning = true
+                    await self.recoverFeedbackImports()
+                    self.feedbackRecoveryRunning = false
+                }
             }
-            do {
-                guard let initial = try await store.videoSnapshot(id: videoID) else { throw VideoContextStoreError.videoNotFound(videoID) }
-                let transcriptNeeded = initial.transcript.isEmpty
-                guard !models.requiresOpenAI(transcriptNeeded: transcriptNeeded) || (self.credentialState == .ready && !key.isEmpty) else {
-                    throw OpenAIClientError.missingAPIKey
-                }
-                let cloudClient = APIUsageRecordingClient(base: self.cloudHTTP, store: store, videoID: videoID,
-                    transcriptionModel: models.transcriptionModel, analysisModel: models.analysisModel)
-                let transcriber: any Transcribing
-                if !transcriptNeeded {
-                    transcriber = SavedTranscriptOnly()
-                } else if models.transcriptionProvider == .localWhisper {
-                    guard !self.speechDownloadActive else { throw LocalProviderError.configuration("Wait for the speech model download to finish before transcribing locally.") }
-                    guard let manager = self.speechModels else { throw LocalProviderError.configuration("The local model directory is unavailable.") }
-                    transcriber = LocalWhisperTranscriber(assets: try await manager.installedAssets(), store: store, progress: progress)
-                } else {
-                    transcriber = OpenAITranscriber(client: cloudClient, apiKey: key, model: models.transcriptionModel)
-                }
-                let generator: any BriefGenerating
-                var analysisID = models.analysisModel
-                if models.analysisProvider == .lmStudio {
-                    guard !needsLocalToken || !localToken.isEmpty else { throw LocalProviderError.configuration("Unlock or enter the LM Studio token in Settings.") }
-                    await progress(.init(stage: .inspecting, detail: "Checking LM Studio"))
-                    let transport = self.localHTTP
-                    let instance = try await LMStudioService(client: transport).loadedModel(configuration: models.lmStudio, token: needsLocalToken ? localToken : "")
-                    try Task.checkCancellation()
-                    var local = models.lmStudio
-                    local.modelID = instance.id
-                    analysisID = instance.id
-                    let client = APIUsageRecordingClient(base: transport, store: store, videoID: videoID,
-                        transcriptionModel: models.transcriptionModel, analysisModel: instance.id, provider: .lmStudio)
-                    generator = LMStudioBriefGenerator(client: client, configuration: local,
-                        token: needsLocalToken ? localToken : "", contextLength: instance.config.contextLength)
-                } else {
-                    generator = OpenAIBriefGenerator(client: cloudClient, apiKey: key, model: models.analysisModel)
-                }
-                try Task.checkCancellation()
-                let pipeline = VideoProcessingPipeline(store: store, paths: paths,
-                    media: FFmpegMediaProcessor(toolchain: toolchain, runner: ProcessRunner()), transcriber: transcriber,
-                    textRecognizer: VisionTextRecognizer(), briefGenerator: generator, progress: progress,
-                    transcriptionIdentity: ProviderIdentity(provider: models.transcriptionProvider == .localWhisper ? .localWhisper : .openAI,
-                        model: models.transcriptionProvider == .localWhisper ? ModelConfiguration.localSpeechModel : models.transcriptionModel),
-                    analysisIdentity: ProviderIdentity(provider: models.analysisProvider == .lmStudio ? .lmStudio : .openAI, model: analysisID))
-                try await pipeline.process(videoID: videoID)
-            } catch is CancellationError {
-                try? await store.updateVideo(id: videoID, status: .cancelled, errorMessage: "Processing was cancelled.")
-            } catch {
-                self.errorMessage = error.localizedDescription
-                try? await store.markIncomplete(videoID: videoID, error: error.localizedDescription)
-            }
-            self.processingVideoID = nil
-            self.activity = nil
-            self.processingProgress = nil
-            self.processingElapsedSeconds = 0
-            self.statusTask?.cancel()
-            await self.loadLibrary()
         }
         statusTask = Task { [weak self] in
             while let self, self.processingVideoID != nil, Task.isCancelled == false {
@@ -396,6 +585,7 @@ final class AppModel {
             try await store.correctTranscript(segmentID: segmentID, correctedText: text)
             await loadLibrary()
         } catch {
+            await recordDiagnosticFailure(error, videoID: selectedVideoID)
             errorMessage = error.localizedDescription
         }
     }
@@ -407,6 +597,7 @@ final class AppModel {
             await loadLibrary()
             return true
         } catch {
+            await recordDiagnosticFailure(error, videoID: videoID)
             errorMessage = error.localizedDescription
             return false
         }
@@ -433,6 +624,7 @@ final class AppModel {
             ))
             await loadLibrary()
         } catch {
+            await recordDiagnosticFailure(error, videoID: snapshot.video.id)
             errorMessage = error.localizedDescription
         }
     }
@@ -446,7 +638,7 @@ final class AppModel {
     }
 
     func requestSeek(to timestamp: TimeInterval) {
-        seekRequest = SeekRequest(timestamp: timestamp)
+        seekRequest = SeekRequest(timestamp: timestamp, videoID: selectedVideoID)
     }
 
     func contextState(for video: VideoRecord) -> AgentHandoffState {
@@ -522,14 +714,29 @@ final class AppModel {
         startCredentialLoad(mode: .interactive)
     }
 
-    func saveSettings() async {
-        guard !isUIFixture else { return }
+    @discardableResult
+    func saveSettings() async -> Bool {
+        guard !isSavingSettings else { return false }
+        isSavingSettings = true
+        settingsSaveError = nil
+        settingsSaved = false
+        defer { isSavingSettings = false }
+        guard !isUIFixture else { settingsSaved = true; return true }
         do {
             let toolchain = MediaToolchain(ytDLP: ytDLPPath, ffmpeg: ffmpegPath, ffprobe: ffprobePath)
-            let models = modelConfiguration
-            StoredPreferences(toolchain: toolchain, models: models, lmStudioUsesToken: lmStudioUsesToken).save()
+            var models = modelConfiguration
+            models.reasoningEffort = analysisReasoningEffort
+            let preferences = StoredPreferences(toolchain: toolchain, models: models, lmStudioUsesToken: lmStudioUsesToken,
+                                                taskUsesAnalysisSettings: taskAnalysisOverride == nil,
+                                                preparationUsesAnalysisSettings: feedbackPreparationOverride == nil,
+                                                taskDefaultInherited: taskDefaultInherited,
+                                                preparationDefaultInherited: preparationDefaultInherited)
             do { try await saveLocalTokenIfEdited() }
-            catch { errorMessage = "Could not save the LM Studio token: \(error.localizedDescription)"; return }
+            catch {
+                settingsSaveError = "Could not save the LM Studio token: \(error.localizedDescription). Check Keychain access and try again."
+                await recordDiagnosticFailure(error, operation: .credentials)
+                return false
+            }
             switch CredentialSaveAction.resolve(value: apiKey, wasEdited: apiKeyWasEdited) {
             case .none:
                 break
@@ -543,24 +750,72 @@ final class AppModel {
                 credentialState = .ready
                 apiKeyWasEdited = false
             }
-            if (transcriptionProvider == .openAI || analysisProvider == .openAI) && apiKey.isEmpty && !apiKeyWasEdited {
+            for (label, credential) in [("Claude", claudeCredential), ("DeepSeek", deepSeekCredential)] {
+                do { try await credential.saveIfEdited() }
+                catch {
+                    settingsSaveError = "Could not save the \(label) API key: \(error.localizedDescription). Check Keychain access and try again."
+                    await recordDiagnosticFailure(error, operation: .credentials); return false
+                }
+            }
+            try preferences.save(to: preferencesDefaults)
+            if (transcriptionProvider == .openAI || selectedAnalysisProviders.contains(.openAI)) && apiKey.isEmpty && !apiKeyWasEdited {
                 startCredentialLoad(mode: .nonInteractive)
             }
             resumeFirstIncompleteRecording()
+            settingsSaved = true
+            return true
         } catch {
             credentialState = .failed(error.localizedDescription)
-            errorMessage = error.localizedDescription
+            settingsSaveError = "Could not save settings: \(error.localizedDescription). Check Keychain access and try again."
+            await recordDiagnosticFailure(error, operation: .credentials)
+            return false
         }
     }
 
-    private func receiveProcessingProgress(_ progress: ProcessingProgress) {
+    private func receiveProcessingProgress(_ progress: ProcessingProgress) async {
+        let changed = processingProgress?.stage != progress.stage || processingProgress?.completed != progress.completed
+        if progress.stage == .analyzing {
+            await DiagnosticTrace.record(changed ? .stateChanged : .progress, stage: progress.stage, completed: progress.completed, total: progress.total)
+        }
         processingProgress = progress
         activity?.update(progress)
         processingElapsedSeconds = max(0, Int(Date().timeIntervalSince(progress.stageStartedAt)))
     }
 
+    func appBecameActive() {
+        guard didAttemptResume else { return }
+        loadSettingsCredentials(retryAccessRequired: true)
+    }
+
+    func reloadSavedAPIKey() {
+        guard !apiKeyWasEdited else { return }
+        startCredentialLoad(mode: .nonInteractive)
+    }
+
+    var canReloadSavedAPIKey: Bool { !apiKeyWasEdited && credentialState != .loading }
+
+    func loadSettingsCredentials(retryAccessRequired: Bool = false) {
+        guard !isUIFixture else { return }
+        let providers = selectedAnalysisProviders
+        if (transcriptionProvider == .openAI || providers.contains(.openAI)), apiKey.isEmpty, !apiKeyWasEdited,
+           credentialState != .ready,
+           (credentialState != .loading || credentialLoadTask == nil),
+           (credentialState != .accessRequired || retryAccessRequired) {
+            startCredentialLoad(mode: .nonInteractive)
+        }
+        if providers.contains(.lmStudio), lmStudioUsesToken, !localTokenEdited,
+           lmTokenState != .ready, lmTokenState != .loading,
+           (lmTokenState != .accessRequired || retryAccessRequired) {
+            Task { await loadLocalToken(mode: .nonInteractive) }
+        }
+        for provider in providers where provider == .claude || provider == .deepSeek {
+            Task { await loadProviderCredential(provider, mode: .nonInteractive, retryAccessRequired: retryAccessRequired) }
+        }
+    }
+
     private func startCredentialLoad(mode: APIKeyAccessMode) {
         guard !isUIFixture else { return }
+        if mode == .nonInteractive && credentialState == .loading && credentialLoadTask != nil { return }
         credentialRequestID += 1
         let requestID = credentialRequestID
         credentialLoadTask?.cancel()
@@ -569,9 +824,11 @@ final class AppModel {
 
         credentialLoadTask = Task { [weak self, credentialLoader] in
             await credentialLoader.invalidatePendingLoad()
-            let result = await credentialLoader.load(mode: mode)
+            let scope = self?.diagnosticScope(.credentials)
+            let result = await DiagnosticTrace.$scope.withValue(scope) { await credentialLoader.load(mode: mode) }
             guard let self, self.credentialRequestID == requestID, Task.isCancelled == false else { return }
             self.credentialTimeoutTask?.cancel()
+            self.credentialLoadTask = nil
             self.applyCredentialLoadResult(result)
         }
 
@@ -585,6 +842,7 @@ final class AppModel {
             guard let self, self.credentialRequestID == requestID, self.credentialState == .loading else { return }
             self.credentialRequestID += 1
             self.credentialLoadTask?.cancel()
+            self.credentialLoadTask = nil
             await credentialLoader.invalidatePendingLoad()
             self.credentialState = .accessRequired
         }
@@ -609,14 +867,30 @@ final class AppModel {
     }
 
     func resumeFirstIncompleteRecording() {
-        guard !isProcessing, analysisProvider != .openAI || !apiKey.isEmpty else { return }
+        guard !isProcessing, credentialReady(for: analysisProvider) else { return }
         if analysisProvider == .lmStudio && lmStudioUsesToken && lmStudioToken.isEmpty { return }
-        let resumable: Set<ProcessingStatus> = [
-            .imported, .inspecting, .extractingAudio, .transcribing, .capturingFrames,
-            .recognizingText, .analyzing, .incomplete
-        ]
-        if let video = videos.first(where: { resumable.contains($0.status) }) {
-            beginProcessing(videoID: video.id)
+        guard !feedbackRecoveryRunning else { return }
+        feedbackRecoveryRunning = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.feedbackRecoveryRunning = false }
+            await self.recoverFeedbackImports()
+            guard !self.isProcessing, let store = self.store else { return }
+            let resumable: Set<ProcessingStatus> = [
+                .imported, .inspecting, .extractingAudio, .transcribing, .capturingFrames,
+                .recognizingText, .analyzing, .incomplete
+            ]
+            for video in self.videos where resumable.contains(video.status) {
+                // A running or unknown checkpoint may represent provider work
+                // whose response was lost. Do not submit it again on startup.
+                guard let checkpoints = try? await store.processingCheckpoints(videoID: video.id),
+                      !checkpoints.contains(where: { $0.state == .running || $0.state == .unknown }) else {
+                    continue
+                }
+                guard !self.isProcessing else { return }
+                self.beginProcessing(videoID: video.id)
+                return
+            }
         }
     }
 
@@ -630,23 +904,40 @@ final class AppModel {
             guard result.status == 0 else { throw MediaImportError.copyFailed(result.text) }
             let frames = try await FFmpegMediaProcessor(toolchain: .init(ytDLP: ytDLPPath, ffmpeg: ffmpegPath, ffprobe: ffprobePath), runner: ProcessRunner()).captureFrames(from: mediaURL, timestamps: [4, 18, 38], directory: try paths.framesDirectory(id: "vid_ui_fixture"))
             let evidence = frames.map { EvidenceItem(videoID: "vid_ui_fixture", timestamp: $0.timestamp, imageRelativePath: paths.relativePath(for: $0.url), ocrText: "Fixture evidence — Payment failed. Try another method.", origin: .automatic) }
-            let video = VideoRecord(id: "vid_ui_fixture", title: "Checkout walkthrough — payment errors, confirmation states, and responsive layout", source: .localFile, sourceValue: "fixture", mediaRelativePath: "fixture.mp4", duration: 125)
+            let project = try await store.createFeedbackProject(name: "Checkout")
+            let otherProject = try await store.createFeedbackProject(name: "Account")
+            let video = VideoRecord(id: "vid_ui_fixture", title: "Checkout walkthrough — payment errors, confirmation states, and responsive layout", source: .localFile, sourceValue: "fixture", mediaRelativePath: "fixture.mp4", duration: 125, projectID: project.id)
             try await store.createVideo(video)
             try await store.publishArtifacts(videoID: video.id, transcript: [
                 TranscriptSegment(videoID: video.id, start: 4, end: 12, originalText: "Open checkout and select the saved payment method."),
                 TranscriptSegment(videoID: video.id, start: 18, end: 25, originalText: "The error message should explain what happened and let the customer try again."),
                 TranscriptSegment(videoID: video.id, start: 38, end: 44, originalText: "Keep the order summary visible while the payment is processing.")
             ], evidence: evidence, brief: BriefDocument(videoID: video.id, markdown: "# Checkout improvements\n## Requested changes\n- **Explicit statement:** Keep the order summary visible. [00:38]\n- Explain payment errors and allow another attempt. [00:18]\n## Steps\n1. Open checkout. [00:04]\n2. Select a payment method.\n3. Submit payment and review the confirmation.\n## Open questions\nThe recording does not specify the retry limit."))
-            let other = VideoRecord(id: "vid_ui_other", title: "Navigation and profile settings", source: .onlineURL, sourceValue: "fixture", mediaRelativePath: "other.mp4", duration: 80)
+            let other = VideoRecord(id: "vid_ui_other", title: "Navigation and profile settings", source: .onlineURL, sourceValue: "fixture", mediaRelativePath: "fixture.mp4", duration: 80, status: .ready, projectID: otherProject.id)
             try await store.createVideo(other)
-            selectedVideoID = video.id
+            workspaceLocation = .init(root: .project(project.id))
             await loadLibrary()
+            let fixtureRunID = try await installUsageFixture(videoID: video.id)
             if CommandLine.arguments.contains("--ui-tasks") {
                 let source = try await store.taskSnapshot(videoID: video.id)
                 let content = TaskContent(title: "Explain payment errors and allow another attempt", behavior: "Show a useful error and keep the order summary visible.", requirements: [.init(text: "Keep the order summary visible", origin: .recording, sourceIDs: [source.transcript[2].id])], checks: [.init(text: "After a failed payment, the customer can try again", origin: .interpretation, sourceIDs: [source.transcript[1].id])], questions: [.init(question: "How many retries should be allowed?")], sourceIDs: source.evidence.map(\.id))
+                if CommandLine.arguments.contains("--ui-task-proposals") {
+                    let provenance = ProviderIdentity(provider: .lmStudio, model: "fixture")
+                    let proposals = [content, TaskContent(title: "Keep the order summary visible", behavior: "Keep the summary visible during payment.")].map {
+                        var proposal = TaskProposal(videoID: video.id, kind: .addition, sourceRevision: source.video.revisions, content: $0, provenance: provenance)
+                        proposal.generationRunID = fixtureRunID
+                        return proposal
+                    }
+                    try await store.publishTaskProposals(proposals, videoID: video.id, expectedSource: source.video.revisions, expectedTasks: [:])
+                    taskGenerationMessage = "2 proposed changes. Review them before applying."
+                } else {
                 _ = try await store.saveTask(VideoTask(videoID: video.id, sourceRevision: source.video.revisions, content: content), expectedRevision: nil, expectedSource: source.video.revisions)
+                }
                 await loadSelection()
-            } else { startUIFixtureActivity(videoID: video.id) }
+            }
+            try await installProjectWorkspaceFixture(videoID: video.id, projectID: project.id)
+            await loadLibrary()
+            if CommandLine.arguments.contains("--ui-processing") { startUIFixtureActivity(videoID: video.id) }
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -663,7 +954,7 @@ final class AppModel {
                 for stage in [ProcessingStatus.transcribing, .recognizingText, .analyzing] {
                     let startedAt = Date.now
                     for count in 0...12 {
-                        receiveProcessingProgress(.init(stage: stage, completed: count, total: 12, stageStartedAt: startedAt))
+                        await receiveProcessingProgress(.init(stage: stage, completed: count, total: 12, stageStartedAt: startedAt))
                         try await Task.sleep(for: .seconds(2))
                     }
                 }
@@ -678,22 +969,27 @@ final class AppModel {
 struct SeekRequest: Equatable {
     let id = UUID()
     let timestamp: TimeInterval
+    let videoID: String?
 }
 
 private struct StoredPreferences: Codable {
     let toolchain: MediaToolchain
     let models: ModelConfiguration
     var lmStudioUsesToken: Bool? = nil
+    var taskUsesAnalysisSettings: Bool? = nil
+    var preparationUsesAnalysisSettings: Bool? = nil
+    var taskDefaultInherited: Bool? = nil
+    var preparationDefaultInherited: Bool? = nil
 
-    static func load() -> Self {
-        guard let data = UserDefaults.standard.data(forKey: "VideoContext.preferences"),
+    static func load(from defaults: UserDefaults) -> Self {
+        guard let data = defaults.data(forKey: "VideoContext.preferences"),
               let value = try? JSONDecoder().decode(Self.self, from: data) else {
             return Self(toolchain: .init(), models: .init())
         }
         return value
     }
 
-    func save() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(self), forKey: "VideoContext.preferences")
+    func save(to defaults: UserDefaults) throws {
+        defaults.set(try JSONEncoder().encode(self), forKey: "VideoContext.preferences")
     }
 }

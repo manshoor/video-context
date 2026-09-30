@@ -18,6 +18,8 @@ public actor VideoContextStore {
         }
         pool = try DatabasePool(path: databaseURL.path, configuration: configuration)
         if access == .readWrite {
+            try Self.backupBeforeProjectMigration(pool: pool, databaseURL: databaseURL)
+            try Self.backupBeforeProductDocumentationMigration(pool: pool, databaseURL: databaseURL)
             var migrator = DatabaseMigrator()
             migrator.registerMigration("createLibrary") { database in
                 try Self.createSchema(in: database)
@@ -50,6 +52,37 @@ public actor VideoContextStore {
                     """)
             }
             migrator.registerMigration("reviewedTasks") { try Self.createTaskSchema(in: $0) }
+            migrator.registerMigration("aiUsageRuns") { try Self.createUsageSchema(in: $0) }
+            migrator.registerMigration("feedbackBatches") { try Self.createFeedbackSchema(in: $0) }
+            migrator.registerMigration("feedbackProjects") { try Self.createFeedbackProjectSchema(in: $0) }
+            migrator.registerMigration("projectWorkspaceOwnership") { try Self.createProjectWorkspaceSchema(in: $0) }
+            migrator.registerMigration("productDocumentationV1") { database in
+                try Self.createTaskDeletionSchema(in: database)
+                try Self.createProjectDocumentationSchema(in: database)
+                try Self.createProcessingRecoverySchema(in: database)
+                try Self.createSourceArtifactHistorySchema(in: database)
+                try Self.createFeedbackImportRecoverySchema(in: database)
+                try Self.createFeedbackSourceHistorySchema(in: database)
+                try Self.createAudioCoverageSchema(in: database)
+                try Self.createDocumentationAnalysisCheckpointSchema(in: database)
+                if try !database.columns(in: "evidence_items").contains(where: { $0.name == "requested_timestamp" }) {
+                    try database.execute(sql: "ALTER TABLE evidence_items ADD COLUMN requested_timestamp REAL")
+                }
+            }
+            migrator.registerMigration("productDocumentationRecoveryV1") { database in
+                // Also upgrade libraries created by an earlier documentation build.
+                try Self.migrateProjectDocumentationImportJobs(in: database)
+                try Self.createProcessingRecoverySchema(in: database)
+                try Self.createSourceArtifactHistorySchema(in: database)
+                try Self.createFeedbackImportRecoverySchema(in: database)
+                try Self.createFeedbackSourceHistorySchema(in: database)
+                try Self.createAudioCoverageSchema(in: database)
+                try Self.createDocumentationAnalysisCheckpointSchema(in: database)
+                if try !database.columns(in: "evidence_items").contains(where: { $0.name == "requested_timestamp" }) {
+                    try database.execute(sql: "ALTER TABLE evidence_items ADD COLUMN requested_timestamp REAL")
+                }
+            }
+            migrator.registerMigration("projectAnalysisSelectionV1") { try Self.createProjectAnalysisSchema(in: $0) }
             try migrator.migrate(pool)
         }
     }
@@ -162,6 +195,7 @@ public actor VideoContextStore {
             guard var video = try Self.fetchVideo(id: videoID, from: database) else {
                 throw VideoContextStoreError.videoNotFound(videoID)
             }
+            try Self.preserveCurrentArtifacts(videoID: videoID, stages: [.transcript, .evidence, .brief], db: database)
             try database.execute(sql: "DELETE FROM transcript_segments WHERE video_id = ?", arguments: [videoID])
             try database.execute(sql: "DELETE FROM evidence_items WHERE video_id = ?", arguments: [videoID])
             try database.execute(sql: "DELETE FROM briefs WHERE video_id = ?", arguments: [videoID])
@@ -190,6 +224,7 @@ public actor VideoContextStore {
                 throw VideoContextStoreError.transcriptSegmentNotFound(segmentID)
             }
             let videoID: String = row["video_id"]
+            try Self.preserveCurrentArtifacts(videoID: videoID, stages: [.transcript], db: database)
             try database.execute(
                 sql: "UPDATE transcript_segments SET corrected_text = ? WHERE id = ?",
                 arguments: [correctedText, segmentID]
@@ -209,6 +244,7 @@ public actor VideoContextStore {
             guard var video = try Self.fetchVideo(id: videoID, from: database) else {
                 throw VideoContextStoreError.videoNotFound(videoID)
             }
+            try Self.preserveCurrentArtifacts(videoID: videoID, stages: [.transcript], db: database)
             try database.execute(sql: "DELETE FROM transcript_segments WHERE video_id = ?", arguments: [videoID])
             for segment in segments { try Self.insertTranscript(segment, into: database) }
             video.revisions.transcript += 1
@@ -227,6 +263,7 @@ public actor VideoContextStore {
             if let expectedEvidenceRevision, video.revisions.evidence != expectedEvidenceRevision {
                 throw LocalProviderError.configuration("Screenshots changed during processing. Your screenshots were preserved. Resume to use the updated evidence.")
             }
+            try Self.preserveCurrentArtifacts(videoID: videoID, stages: [.evidence], db: database)
             try database.execute(sql: "DELETE FROM evidence_items WHERE video_id = ?", arguments: [videoID])
             for item in items { try Self.insertEvidence(item, into: database) }
             video.revisions.evidence += 1
@@ -241,6 +278,7 @@ public actor VideoContextStore {
             guard var video = try Self.fetchVideo(id: item.videoID, from: database) else {
                 throw VideoContextStoreError.videoNotFound(item.videoID)
             }
+            try Self.preserveCurrentArtifacts(videoID: item.videoID, stages: [.evidence], db: database)
             try Self.insertEvidence(item, into: database)
             video.revisions = video.revisions.afterEvidenceCorrection()
             video.updatedAt = .now
@@ -257,6 +295,7 @@ public actor VideoContextStore {
             if let expectedRevision, video.revisions != expectedRevision {
                 throw LocalProviderError.configuration("The recording was corrected during analysis. Your corrections were preserved. Resume processing to generate a brief from the current evidence.")
             }
+            try Self.preserveCurrentArtifacts(videoID: videoID, stages: [.brief], db: database)
             try database.execute(sql: "DELETE FROM briefs WHERE video_id = ?", arguments: [videoID])
             try Self.insertBrief(brief, into: database)
             video.revisions = video.revisions.afterBriefRegeneration()
@@ -278,6 +317,7 @@ public actor VideoContextStore {
             guard var video = try Self.fetchVideo(id: videoID, from: database) else {
                 throw VideoContextStoreError.videoNotFound(videoID)
             }
+            try Self.preserveCurrentArtifacts(videoID: videoID, stages: [.brief], db: database)
             try database.execute(
                 sql: "INSERT INTO briefs (video_id, markdown, is_user_edited) VALUES (?, ?, ?) ON CONFLICT(video_id) DO UPDATE SET markdown = excluded.markdown, is_user_edited = excluded.is_user_edited",
                 arguments: [videoID, markdown, userEdited]
@@ -400,7 +440,7 @@ extension VideoContextStore {
     static func insertVideo(_ video: VideoRecord, into database: Database) throws {
         try database.execute(
             sql: """
-                INSERT INTO videos VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO videos (id,title,source_type,source_value,media_path,duration,status,error_message,created_at,updated_at,transcript_revision,evidence_revision,brief_revision,brief_source_transcript,brief_source_evidence,estimated_cost_usd,project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
             arguments: videoArguments(video)
         )
@@ -432,7 +472,7 @@ extension VideoContextStore {
             video.createdAt.timeIntervalSince1970, video.updatedAt.timeIntervalSince1970,
             video.revisions.transcript, video.revisions.evidence, video.revisions.brief,
             video.revisions.briefSourceTranscript, video.revisions.briefSourceEvidence,
-            video.estimatedCostUSD
+            video.estimatedCostUSD, video.projectID
         ]
     }
 
@@ -459,7 +499,8 @@ extension VideoContextStore {
                 briefSourceTranscript: row["brief_source_transcript"],
                 briefSourceEvidence: row["brief_source_evidence"]
             ),
-            estimatedCostUSD: row["estimated_cost_usd"]
+            estimatedCostUSD: row["estimated_cost_usd"],
+            projectID: row.hasColumn("project_id") ? row["project_id"] : nil
         )
     }
 
@@ -479,14 +520,14 @@ extension VideoContextStore {
 
     static func insertEvidence(_ item: EvidenceItem, into database: Database) throws {
         try database.execute(
-            sql: "INSERT INTO evidence_items VALUES (?, ?, ?, ?, ?, ?)",
-            arguments: [item.id, item.videoID, item.timestamp, item.imageRelativePath, item.ocrText, item.origin.rawValue]
+            sql: "INSERT INTO evidence_items(id,video_id,timestamp,image_path,ocr_text,origin,requested_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            arguments: [item.id, item.videoID, item.timestamp, item.imageRelativePath, item.ocrText, item.origin.rawValue, item.requestedTimestamp]
         )
     }
 
     static func evidence(from row: Row) -> EvidenceItem {
         EvidenceItem(
-            id: row["id"], videoID: row["video_id"], timestamp: row["timestamp"],
+            id: row["id"], videoID: row["video_id"], requestedTimestamp: row.hasColumn("requested_timestamp") ? row["requested_timestamp"] : nil, timestamp: row["timestamp"],
             imageRelativePath: row["image_path"], ocrText: row["ocr_text"],
             origin: EvidenceOrigin(rawValue: row["origin"]) ?? .automatic
         )
