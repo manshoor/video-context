@@ -145,13 +145,30 @@ public struct DiagnosticEvent: Codable, Sendable {
 }
 public enum DiagnosticBuild {
     public static var current: String {
-        // Both bundled executables use the same Info.plist. Standalone development builds are explicit.
-        let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+        metadata(executable: URL(fileURLWithPath: CommandLine.arguments[0])).version
+    }
+    public static func metadata(executable: URL) -> DiagnosticBuildMetadata {
+        // Both bundled executables use the same Info.plist. Standalone builds are explicit.
         let plist = executable.deletingLastPathComponent().deletingLastPathComponent().appending(path: "Info.plist")
         guard let data = try? Data(contentsOf: plist), let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let version = info["CFBundleShortVersionString"] as? String, let build = info["CFBundleVersion"] as? String,
               version.range(of: #"^[0-9.]+$"#, options: .regularExpression) != nil,
-              build.range(of: #"^[0-9.]+$"#, options: .regularExpression) != nil else { return "development" }
-        return "\(version) (\(build))"
+              build.range(of: #"^[0-9.]+$"#, options: .regularExpression) != nil else { return .init(version: "development", stamp: nil) }
+        var stamp: DiagnosticBuildStamp?
+        if let date = info["VideoContextBuildDateUTC"] as? String,
+           ISO8601DateFormatter().date(from: date) != nil, date.hasSuffix("Z"),
+           let hash = info["VideoContextMCPBinarySHA256"] as? String,
+           hash.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil {
+            stamp = .init(dateUTC: date, binarySHA256: hash)
+        }
+        return .init(version: "\(version) (\(build))", stamp: stamp)
     }
+}
+public struct DiagnosticBuildStamp: Equatable, Sendable {
+    public let dateUTC: String
+    public let binarySHA256: String
+}
+public struct DiagnosticBuildMetadata: Equatable, Sendable {
+    public let version: String
+    public let stamp: DiagnosticBuildStamp?
 }

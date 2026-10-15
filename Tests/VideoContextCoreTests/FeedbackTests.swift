@@ -501,6 +501,46 @@ struct FeedbackTests {
         #expect(try await store.feedbackSnapshot(id: batch.id).tasks.allSatisfy(\.isApproved))
     }
 
+    @Test func mcpTaskBlocksCarryItemIDsAndQuestionState() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = try VideoContextStore(databaseURL: root.appending(path: "test.sqlite"))
+        let batch = FeedbackBatch(videoID: "vid_fixture", title: "Manager", rawText: "Show success")
+        try await saveBatch(batch, in: store)
+        let sourceID = try #require(batch.comments.first?.id)
+
+        // A long requirement splits into several blocks; each keeps the ID.
+        var taskContent = content(sourceID)
+        taskContent.requirements[0].text = String(repeating: "Preview works on every screen. ", count: 80)
+        var question = TaskQuestion(question: "Which screen size?", sourceIDs: [sourceID])
+        question.isBlocking = false
+        question.nonBlockingReason = "Default to desktop"
+        question.category = .investigation
+        taskContent.questions = [question]
+        let task = try await store.saveFeedbackTask(.init(batchID: batch.id, sourceRevision: batch.revision, content: taskContent),
+                                                    expectedRevision: nil, expectedBatchRevision: batch.revision)
+
+        var blocks: [FeedbackContextBlock] = []
+        var cursor: String?
+        repeat {
+            let page = try await FeedbackMCPService(store: store).task(batchID: batch.id, taskID: task.id,
+                expectedBatchRevision: batch.revision, expectedRevision: task.revision, cursor: cursor)
+            blocks += page.blocks
+            cursor = page.nextCursor
+        } while cursor != nil
+
+        let requirements = blocks.filter { $0.kind == "requirement" }
+        #expect(requirements.count > 1)
+        #expect(requirements.allSatisfy { $0.itemID == taskContent.requirements[0].id })
+        #expect(blocks.filter { $0.kind == "acceptance_check" }.map(\.itemID) == [taskContent.checks[0].id])
+        let questionBlock = try #require(blocks.first { $0.kind == "question" })
+        #expect(questionBlock.itemID == question.id)
+        #expect(questionBlock.text.contains("Blocking: false; unresolved: false"))
+        #expect(questionBlock.text.contains("Category: investigation"))
+        #expect(questionBlock.text.contains("Non-blocking reason: Default to desktop"))
+        #expect(blocks.filter { $0.kind == "title" }.allSatisfy { $0.itemID == nil })
+    }
+
     @Test func paginationAndPublicationRejectChangedRevisions() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

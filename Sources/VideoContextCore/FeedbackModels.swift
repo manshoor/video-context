@@ -2,7 +2,7 @@ import Foundation
 
 public enum FeedbackReviewer: String, Codable, CaseIterable, Sendable { case unspecified, qa, manager }
 public enum FeedbackIssueKind: String, Codable, CaseIterable, Sendable { case feedback, request }
-public enum FeedbackSourceKind: String, Codable, Sendable { case comment, link, image, video, recording, jam, document }
+public enum FeedbackSourceKind: String, Codable, Sendable { case comment, link, image, video, recording, jam, document, transcript }
 public enum FeedbackSourceStatus: String, Codable, Sendable { case pending, ready, failed }
 
 public struct FeedbackProject: Codable, Equatable, Sendable, Identifiable {
@@ -106,6 +106,7 @@ public struct FeedbackBatch: Codable, Equatable, Sendable, Identifiable {
         revision = 1; createdAt = .now; updatedAt = .now
         let parsed = Self.parse(rawText)
         comments = parsed.0; sources = parsed.1
+        if !transcriptSources.isEmpty { batchWideSourceIDs = unassignedSourceIDs }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -131,8 +132,9 @@ public struct FeedbackBatch: Codable, Equatable, Sendable, Identifiable {
 
     public static func parse(_ raw: String) -> ([FeedbackComment], [FeedbackSource]) {
         let expression = try! NSRegularExpression(pattern: #"https?://[^\s<>)\]]+"#, options: [.caseInsensitive])
+        let transcriptInput = FeedbackTranscriptInput.split(raw)
         var sources: [FeedbackSource] = [], comments: [FeedbackComment] = []
-        for (offset, line) in raw.components(separatedBy: .newlines).enumerated() {
+        for (offset, line) in (transcriptInput?.comments ?? raw).components(separatedBy: .newlines).enumerated() {
             let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
             let ns = text as NSString
@@ -150,15 +152,36 @@ public struct FeedbackBatch: Codable, Equatable, Sendable, Identifiable {
             }
             let remaining = text.replacingOccurrences(of: #"\[[^\]]*\]\(https?://[^)]+\)|https?://[^\s<>)\]]+"#, with: "", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if remaining.isEmpty, !ids.isEmpty, !comments.isEmpty {
-                comments[comments.count - 1].sourceIDs = Array(Set(comments[comments.count - 1].sourceIDs + ids)).sorted()
-                comments[comments.count - 1].lineNumbers.append(offset + 1)
+            if remaining.isEmpty, !ids.isEmpty, !comments.isEmpty || transcriptInput != nil {
+                if !comments.isEmpty {
+                    comments[comments.count - 1].sourceIDs = Array(Set(comments[comments.count - 1].sourceIDs + ids)).sorted()
+                    comments[comments.count - 1].lineNumbers.append(offset + 1)
+                }
             } else {
                 comments.append(.init(text: text, sourceIDs: Array(Set(ids)).sorted(), lineNumbers: [offset + 1]))
             }
         }
+        if let transcriptInput {
+            let ns = transcriptInput.transcript as NSString
+            for match in expression.matches(in: transcriptInput.transcript, range: NSRange(location: 0, length: ns.length)) {
+                let link = ns.substring(with: match.range).trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?"))
+                if !sources.contains(where: { $0.url == link }) {
+                    let kind: FeedbackSourceKind = URL(string: link).flatMap(JamLink.init(url:)) == nil ? .link : .jam
+                    sources.append(FeedbackSource(url: link, kind: kind))
+                }
+            }
+            sources.append(FeedbackSource(kind: .transcript, status: .ready,
+                filename: "Pasted video transcript", ocrText: transcriptInput.transcript))
+        }
         return (comments, sources)
     }
+
+    public var transcriptSources: [FeedbackSource] {
+        sources.filter { $0.kind == .transcript && !$0.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    public var needsTranscriptIssueExtraction: Bool { !transcriptSources.isEmpty && comments.isEmpty }
+    public var canReparseTranscript: Bool { transcriptSources.isEmpty && FeedbackTranscriptInput.split(rawText) != nil }
 
     public mutating func addUnassignedLocalSources(named filenames: [String]) -> [FeedbackSource] {
         let added = filenames.map { FeedbackSource(kind: $0.lowercased().hasSuffix(".mp4") ? .video : .image, filename: $0) }

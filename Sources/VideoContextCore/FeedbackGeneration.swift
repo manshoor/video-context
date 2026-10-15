@@ -116,6 +116,9 @@ public struct FeedbackGenerator<Client: HTTPDataLoading>: Sendable {
             ]
             var frames: [(label: String, data: Data, evidence: ProjectEvidenceReference, ocrText: String)] = []
             var transcriptParts: [String] = []
+            if !batch.transcriptSources.isEmpty {
+                lines.append("Pasted video transcripts are evidence for the reviewed focus issues. Do not copy a full transcript into task requirements, create tasks for each passage, or treat praise and navigation as requested changes. Keep exact supporting quotes and timestamps. A supplied transcript does not prove that video frames were inspected.")
+            }
             var recordingReferences: [ProjectEvidenceReference] = []
             var allowed: [String] = []
             var visitedRecordings: Set<String> = []

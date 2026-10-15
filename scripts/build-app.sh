@@ -37,5 +37,12 @@ if [[ -d "$contents/MacOS/VideoContext_VideoContextApp.bundle" ]]; then
 fi
 chmod 755 "$contents/MacOS/VideoContext" "$contents/MacOS/video-context-mcp"
 
-codesign --force --deep --sign - "$app_bundle"
+# The stamp identifies the signed MCP bytes. Do not use --deep when signing
+# the app: that would sign the nested executable again after it was hashed.
+codesign --force --sign - "$contents/MacOS/video-context-mcp"
+mcp_hash="$(shasum -a 256 "$contents/MacOS/video-context-mcp" | awk '{print $1}')"
+build_date="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+/usr/libexec/PlistBuddy -c "Add :VideoContextBuildDateUTC string $build_date" "$contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :VideoContextMCPBinarySHA256 string $mcp_hash" "$contents/Info.plist"
+codesign --force --sign - "$app_bundle"
 echo "$app_bundle"

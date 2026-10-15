@@ -22,7 +22,7 @@ struct FeedbackCreationSheet: View {
             Text("For: \(recordingTitle)").font(.caption).foregroundStyle(.secondary)
             TextField("Batch title", text: $title)
             TextField("Project (optional)", text: $project).disabled(fixedProject != nil)
-            Text("Paste QA and manager comments with their links. Keep each comment on its own line.")
+            Text("Paste comments with their links, one issue per line. For a video, paste its link and timestamped transcript, or add a ‘transcript’ heading. We will extract distinct issues for review.")
                 .font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $feedback).frame(minHeight: 260).border(.quaternary)
             HStack {
@@ -86,7 +86,7 @@ struct ProjectFeedbackPane: View {
                 Spacer()
                 Button("New Feedback", systemImage: "plus") { showNew = true }
             }
-            Text("Project feedback and Cursor tasks").font(.caption).foregroundStyle(.secondary)
+            Text("Project feedback and coding agent tasks").font(.caption).foregroundStyle(.secondary)
             if batches.isEmpty {
                 ContentUnavailableView("No project feedback", systemImage: "text.bubble",
                                        description: Text("Paste a QA issue list or a separate request for this project."))
@@ -146,7 +146,7 @@ struct FeedbackPane: View {
                 LazyVStack(alignment: .leading, spacing: 9) {
                     if batches.isEmpty {
                         ContentUnavailableView("No feedback for this recording", systemImage: "text.bubble",
-                                               description: Text("Paste QA or manager comments here to create Cursor tasks."))
+                                               description: Text("Paste QA or manager comments here to create coding agent tasks."))
                     }
                     ForEach(batches) { batch in
                         Button {
@@ -267,11 +267,11 @@ struct FeedbackLibraryView: View {
                         }.help("Import images or MP4 files, then assign each to an issue or batch-wide context")
                             .disabled(model.feedbackBusy)
                         Button("Edit Feedback", systemImage: "pencil") { editingBatch = batch }
-                        Button("Suggest issue links", systemImage: "sparkles.rectangle.stack") {
+                        Button(batch.needsTranscriptIssueExtraction ? "Extract issues from transcript" : "Suggest issue links", systemImage: "sparkles.rectangle.stack") {
                             Task { await model.prepareFeedback(batchID: batch.id) }
                         }.disabled(model.feedbackBusy)
                         Button("Generate tasks", systemImage: "sparkles") { model.generateFeedbackTasks() }
-                            .disabled(model.feedbackBusy || !batch.unassignedSourceIDs.isEmpty || batch.projectID == nil)
+                            .disabled(model.feedbackBusy || !batch.unassignedSourceIDs.isEmpty || batch.projectID == nil || batch.comments.allSatisfy(\.isShared))
                         if model.feedbackBusy {
                             Button("Cancel generation") { model.cancelFeedbackGeneration() }
                                 .disabled(model.feedbackGenerationTask == nil)
@@ -372,6 +372,16 @@ struct FeedbackLibraryView: View {
             Text("Original feedback and evidence").font(.headline)
             Text("Assign new files to an issue or mark them as batch-wide context before generating tasks.")
                 .font(.caption).foregroundStyle(.secondary)
+            if batch.needsTranscriptIssueExtraction {
+                Text("The transcript is saved as evidence. Extract issues, review them, then generate tasks.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if !batch.batchWideSourceIDs.isEmpty {
+                Text("Shared evidence").font(.headline)
+                ForEach(batch.batchWideSourceIDs, id: \.self) { id in
+                    if let source = batch.sources.first(where: { $0.id == id }) { sourceCard(source, batchID: batch.id) }
+                }
+            }
             if !batch.unassignedSourceIDs.isEmpty {
                 Text("Unassigned evidence").font(.headline).foregroundStyle(.orange)
                 ForEach(batch.unassignedSourceIDs, id: \.self) { id in
@@ -451,14 +461,18 @@ struct FeedbackLibraryView: View {
             if source.kind == .image, let path = source.localPath, let url = model.paths?.absoluteURL(relativePath: path), let image = NSImage(contentsOf: url) {
                 Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 180)
             }
-            if !source.ocrText.isEmpty { Text(source.ocrText).font(.caption).lineLimit(5).textSelection(.enabled) }
+            if source.kind == .transcript {
+                DisclosureGroup("Full transcript") { Text(source.ocrText).font(.caption).textSelection(.enabled) }
+            } else if !source.ocrText.isEmpty { Text(source.ocrText).font(.caption).lineLimit(5).textSelection(.enabled) }
             HStack {
                 if source.kind == .jam, source.url != nil {
                     Button("Retry evidence") { Task { await model.retryJamEvidence(batchID: batchID, sourceID: source.id) } }
                 } else if source.status == .failed, source.url != nil {
                     Button("Retry") { Task { await model.processFeedbackSources(batchID: batchID, only: source.id) } }
                 }
-                Button("Replace file") { replacementSourceID = source.id; showFilePicker = true }
+                if source.kind != .transcript {
+                    Button("Replace file") { replacementSourceID = source.id; showFilePicker = true }
+                }
             }.disabled(model.feedbackBusy)
         }.padding(8).background(.background, in: .rect(cornerRadius: 6))
     }
@@ -581,6 +595,9 @@ private struct FeedbackBatchEditSheet: View {
                     if draft.rawText != parsedRawText {
                         Button("Reparse edited text and links") { reparse() }
                             .help("Refresh comments and links from the edited text before saving")
+                    } else if draft.canReparseTranscript {
+                        Button("Reparse transcript as evidence") { reparse() }
+                            .help("Keep the original transcript and links as evidence, then extract distinct issues")
                     }
                     ForEach($draft.comments) { $comment in
                         VStack(alignment: .leading, spacing: 8) {
@@ -636,33 +653,12 @@ private struct FeedbackBatchEditSheet: View {
                 Button("Save changes") {
                     saving = true
                     Task { if await model.saveFeedbackBatch(draft, expectedRevision: initial.revision) { dismiss() }; saving = false }
-                }.buttonStyle(.borderedProminent).disabled(saving || draft == initial || draft.title.isEmpty || draft.comments.isEmpty || draft.rawText != parsedRawText)
+                }.buttonStyle(.borderedProminent).disabled(saving || draft == initial || draft.title.isEmpty || (draft.comments.isEmpty && draft.transcriptSources.isEmpty) || draft.rawText != parsedRawText)
             }
         }.padding(20).frame(width: 760, height: 710)
     }
     private func reparse() {
-        let previousComments = draft.comments
-        let previousSources = draft.sources
-        let (comments, sources) = FeedbackBatch.parse(draft.rawText)
-        let mapped: [FeedbackSource] = sources.map { candidate in
-            previousSources.first(where: { $0.url == candidate.url }) ?? candidate
-        }
-        let attachedSources = previousSources.filter { $0.url == nil }
-        let attachedIDs = Set(attachedSources.map(\.id))
-        draft.comments = comments.enumerated().map { index, item in
-            let old = previousComments.first(where: { $0.text == item.text })
-                ?? (index < previousComments.count ? previousComments[index] : nil)
-            var value = old ?? item
-            value.text = item.text
-            value.lineNumbers = item.lineNumbers
-            let linkedIDs: [String] = item.sourceIDs.compactMap { candidateID -> String? in
-                guard let candidate = sources.first(where: { $0.id == candidateID }) else { return nil }
-                return mapped.first(where: { $0.url == candidate.url })?.id
-            }
-            value.sourceIDs = Array(Set(linkedIDs + (old?.sourceIDs.filter { attachedIDs.contains($0) } ?? []))).sorted()
-            return value
-        }
-        draft.sources = mapped + attachedSources
+        draft.reparseOriginalText()
         parsedRawText = draft.rawText
     }
 }
@@ -774,7 +770,7 @@ private struct FeedbackHandoffSheet: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Copy for Cursor").font(.title2.bold())
+            Text("Copy for AI").font(.title2.bold())
             HStack {
                 ForEach(TaskHandoffMode.allCases, id: \.self) { item in
                     Button(item.rawValue) { mode = item }.buttonStyle(.bordered)

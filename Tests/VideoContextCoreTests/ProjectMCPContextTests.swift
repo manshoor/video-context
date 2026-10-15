@@ -152,6 +152,38 @@ struct ProjectMCPContextTests {
         }
     }
 
+    @Test func searchMatchesEveryWordAndRanksPhraseHitsFirst() async throws {
+        let fixture = try MCPFixture()
+        let project = try await fixture.store.createFeedbackProject(name: "Search project")
+        let scattered = try await fixture.store.createProjectRequest(projectID: project.id, title: "Scattered request",
+            text: "The gallery must label every AI result and its images")
+        let phrase = try await fixture.store.createProjectRequest(projectID: project.id, title: "Phrase request",
+            text: "Show gallery AI images in a grid")
+        let service = ProjectMCPService(store: fixture.store)
+
+        // Words anywhere in one item match; the old exact-phrase search found
+        // only the phrase request.
+        let search = try await service.search(projectID: project.id, query: "Gallery  AI images", limit: 100)
+        #expect(search.hits.contains { $0.id == "feedback:\(scattered.id)" })
+        #expect(search.hits.contains { $0.id == "feedback:\(phrase.id)" })
+
+        // Phrase hits come before hits with scattered words.
+        let firstScattered = try #require(search.hits.firstIndex { !$0.excerpt.lowercased().contains("gallery ai images") })
+        #expect(search.hits[..<firstScattered].allSatisfy { $0.excerpt.lowercased().contains("gallery ai images") })
+        #expect(search.hits[firstScattered...].allSatisfy { !$0.excerpt.lowercased().contains("gallery ai images") })
+        #expect(firstScattered > 0)
+
+        // One missing word gives no hit.
+        let missing = try await service.search(projectID: project.id, query: "gallery AI videos", limit: 100)
+        #expect(missing.hits.isEmpty)
+
+        // Page 2 continues the same ordered list.
+        let firstPage = try await service.search(projectID: project.id, query: "gallery AI images", limit: 1)
+        let cursor = try #require(firstPage.nextCursor)
+        let secondPage = try await service.search(projectID: project.id, query: "gallery AI images", cursor: cursor, limit: 1)
+        #expect(firstPage.hits.map(\.id) + secondPage.hits.map(\.id) == Array(search.hits.prefix(2)).map(\.id))
+    }
+
     @Test func proposalSubmissionIsSeparateIdempotentInboxWrite() async throws {
         let fixture = try MCPFixture()
         let project = try await fixture.store.createFeedbackProject(name: "Proposal project")

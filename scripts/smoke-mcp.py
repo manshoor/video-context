@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
+import base64
+import hashlib
 import json
+import plistlib
 import sqlite3
 import subprocess
 import sys
@@ -291,6 +294,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="video-context-mcp-") as library_value:
         library = Path(library_value)
         create_fixture_library(library)
+        original_database = hashlib.sha256((library / "library.sqlite").read_bytes()).digest()
         process = subprocess.Popen(
             [str(executable), "--library", str(library)],
             stdin=subprocess.PIPE,
@@ -312,6 +316,18 @@ def main() -> None:
             })
             initialized = receive(process)
             assert initialized["result"]["serverInfo"]["name"] == "video-context"
+            bundle_plist = executable.parent.parent / "Info.plist"
+            expected_version = "development"
+            if bundle_plist.is_file():
+                with bundle_plist.open("rb") as file:
+                    info = plistlib.load(file)
+                expected_version = f'{info["CFBundleShortVersionString"]} ({info["CFBundleVersion"]})'
+            assert initialized["result"]["serverInfo"]["version"] == expected_version, initialized["result"]["serverInfo"]
+            # Claude Code truncates instructions at 2,048 characters; Codex
+            # reads the first 512 as a self-contained summary.
+            instructions = initialized["result"].get("instructions") or ""
+            assert 0 < len(instructions) <= 2048, len(instructions)
+            assert "list_projects" in instructions[:512], instructions[:512]
 
             send(process, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
             send(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
@@ -401,6 +417,14 @@ def main() -> None:
             assert "Only beta feedback" not in json.dumps(task)
             evidence = call_tool(process, 30, "get_feedback_evidence", {**args, "source_id": "fsrc_alpha"})
             assert evidence["structuredContent"]["jam"]["state"] == "ready"
+            image_evidence = call_tool(process, 35, "get_feedback_evidence", {
+                "batch_id": "fb_beta", "task_id": "ftask_beta", "source_id": "fsrc_beta",
+                "expected_batch_revision": 1, "expected_revision": 2,
+            })
+            native_image = next(item for item in image_evidence["content"] if item["type"] == "image")
+            assert native_image["mimeType"] == "image/jpeg"
+            subprocess.run(["/opt/homebrew/bin/ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "null", "-"],
+                           input=base64.b64decode(native_image["data"], validate=True), check=True, timeout=10)
             jam = call_tool(process, 34, "get_feedback_jam_context", {**args, "source_id": "fsrc_alpha"})
             assert jam.get("isError") is not True, jam
             assert jam["structuredContent"]["sourceID"] == "fsrc_alpha"
@@ -423,8 +447,39 @@ def main() -> None:
             assert alpha_image != beta_image
             assert missing["isError"] is True
             assert "Recording not found: vid_missing" in missing["content"][0]["text"]
+
+            # Every error carries a machine-readable code that tells the agent
+            # what to do next. The text block keeps the plain message.
+            def error_of(result: dict) -> dict:
+                assert result["isError"] is True, result
+                error = result["structuredContent"]["error"]
+                assert error["message"] == result["content"][0]["text"]
+                return error
+
+            assert error_of(missing)["code"] == "not_found"
+            assert error_of(call_tool(process, 40, "get_video_task", {"video_id": "vid_alpha", "task_id": "missing"}))["code"] == "not_found"
+            conflict = error_of(call_tool(process, 41, "get_video_task", {"video_id": "vid_alpha", "task_id": "task_alpha", "expected_revision": 1}))
+            assert conflict["code"] == "revision_conflict"
+            assert "updated handoff" in conflict["message"]
+            stale = error_of(call_tool(process, 42, "get_feedback_task", {**args, "cursor": "stale"}))
+            assert stale["code"] == "stale_cursor"
+            assert "without cursor" in stale["message"]
+            # An outdated revision stays a revision conflict even when the call
+            # also sent a cursor; dropping the cursor cannot fix it.
+            outdated = error_of(call_tool(process, 46, "get_feedback_task", {**args, "expected_revision": 1, "cursor": "stale"}))
+            assert outdated["code"] == "revision_conflict", outdated
+            invalid = error_of(call_tool(process, 43, "get_video_frame", {"video_id": "vid_alpha"}))
+            assert invalid["code"] == "invalid_argument"
+            assert "timestamp_seconds" in invalid["message"]
+            locator = error_of(call_tool(process, 44, "get_project_evidence", {
+                "project_id": "project_alpha", "kind": "document", "source_id": "pdocsrc_alpha", "revision": 1,
+            }))
+            assert locator["code"] == "invalid_argument"
+            assert "locator" in locator["message"]
+            assert error_of(call_tool(process, 45, "get_video_frame", {"video_id": "vid_alpha", "timestamp_seconds": 99}))["code"] == "failed"
             process.stdin.close()
             assert process.wait(timeout=5) == 0, "MCP must exit when its client closes stdin"
+            assert hashlib.sha256((library / "library.sqlite").read_bytes()).digest() == original_database, "Retrieval changed the library database"
             proposal_process = subprocess.Popen(
                 [str(executable), "--library", str(library), "--allow-document-proposals"],
                 stdin=subprocess.PIPE,
@@ -474,6 +529,7 @@ def main() -> None:
                 inbox.close()
                 proposal_process.stdin.close()
                 assert proposal_process.wait(timeout=5) == 0, "Opt-in MCP must exit when its client closes stdin"
+                assert hashlib.sha256((library / "library.sqlite").read_bytes()).digest() == original_database, "Sidecar submission changed the library database"
             finally:
                 proposal_process.terminate()
                 proposal_process.wait(timeout=5)

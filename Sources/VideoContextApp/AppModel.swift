@@ -6,6 +6,7 @@ import VideoContextCore
 @MainActor
 @Observable
 final class AppModel {
+    let agentConnections = AgentConnectionsModel()
     var videos: [VideoRecord] = []
     var feedbackProjects: [FeedbackProject] = []
     var workspaceLocation = WorkspaceLocation()

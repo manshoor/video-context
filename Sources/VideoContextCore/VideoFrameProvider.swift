@@ -71,10 +71,14 @@ public struct VideoFrameProvider: Sendable {
         let outputURL = FileManager.default.temporaryDirectory
             .appending(path: "video-context-frame-\(UUID().uuidString).jpg")
         defer { try? FileManager.default.removeItem(at: outputURL) }
+        // Seek on the input so showinfo sees only the returned frame. Its
+        // pts_time is then the offset from the requested time, e.g. 0.05 for
+        // a 1.25 s request that lands on the 1.3 s frame. Output seeking made
+        // showinfo report the recording's first frame, always 0.
         var arguments = [
             "-hide_banner", "-loglevel", "info", "-y",
-            "-i", videoURL.path,
             "-ss", String(format: "%.3f", timestamp),
+            "-i", videoURL.path,
             "-frames:v", "1"
         ]
         if let crop {
@@ -96,7 +100,7 @@ public struct VideoFrameProvider: Sendable {
         return VideoFrame(
             data: data,
             mimeType: "image/jpeg",
-            actualTimestamp: FFmpegOutputParser.firstFrameTimestamp(output.text) ?? timestamp
+            actualTimestamp: timestamp + (FFmpegOutputParser.firstFrameTimestamp(output.text) ?? 0)
         )
     }
 }

@@ -240,14 +240,7 @@ struct SettingsView: View {
 
             DiagnosticsSettingsSection(model: model)
 
-            Section("Agent connections") {
-                Text("Each client starts its own local MCP process. The app can be closed after processing finishes.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                configRow(name: "Codex", value: codexConfig)
-                configRow(name: "Claude Code", value: jsonConfig)
-                configRow(name: "Cursor", value: jsonConfig)
-            }
+            AgentConnectionsSettingsSection(model: model, connections: model.agentConnections)
 
         }
         .formStyle(.grouped)
@@ -349,41 +342,4 @@ struct SettingsView: View {
         }
     }
 
-    private func configRow(name: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(name).font(.headline)
-                Spacer()
-                Button("Copy configuration", systemImage: "doc.on.doc") {
-                    model.copy(value)
-                    copiedLabel = name
-                }
-            }
-            Text(value)
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-                .lineLimit(5)
-        }
-    }
-
-    private var codexConfig: String {
-        """
-        [mcp_servers.video-context]
-        command = "\(model.mcpExecutablePath)"
-        args = ["--ffmpeg", "\(model.ffmpegPath)"]
-        """
-    }
-
-    private var jsonConfig: String {
-        """
-        {
-          "mcpServers": {
-            "video-context": {
-              "command": "\(model.mcpExecutablePath)",
-              "args": ["--ffmpeg", "\(model.ffmpegPath)"]
-            }
-          }
-        }
-        """
-    }
 }

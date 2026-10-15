@@ -70,8 +70,9 @@ extension AppModel {
                 for (file, source) in zip(files, added) {
                     await attachFeedbackFile(file, batchID: batch.id, sourceID: source.id)
                 }
+                if !isUIFixture && batch.needsTranscriptIssueExtraction { await prepareFeedback(batchID: batch.id) }
                 if !isUIFixture { await processFeedbackSources(batchID: batch.id) }
-                if !isUIFixture { await prepareFeedback(batchID: batch.id) }
+                if !isUIFixture && !batch.needsTranscriptIssueExtraction { await prepareFeedback(batchID: batch.id) }
             }
             return true
         } catch { errorMessage = error.localizedDescription; return false }
@@ -441,10 +442,10 @@ extension AppModel {
 
     func prepareFeedback(batchID: String) async {
         guard !isUIFixture else { feedbackProgress = "Issue suggestions are disabled in the demo library."; return }
-        guard !feedbackBusy, let store, let paths else { return }
+        guard !feedbackBusy, !editingFeedbackIDs.contains(batchID), let store, let paths else { return }
         let configuration = modelConfiguration.feedbackPreparationConfiguration
         guard credentialReady(for: configuration.analysisProvider) else {
-            feedbackProgress = "Issue suggestions unavailable: unlock the \(configuration.analysisProvider.label) credential. You can still review the parsed issues."
+            feedbackProgress = "Feedback preparation unavailable: unlock the \(configuration.analysisProvider.label) credential. The original feedback is saved."
             return
         }
         let credential = credentialValue(for: configuration.analysisProvider)
@@ -454,19 +455,29 @@ extension AppModel {
             let snapshot = try await store.feedbackSnapshot(id: batchID)
             let client = UsageRecordingClient(base: transport(for: configuration.analysisProvider), provider: configuration.analysisProvider.identity,
                                               model: configuration.selectedAnalysisModel, stage: .taskExtraction)
-            let suggestions = try await withUsageRun(operation: .taskGeneration, videoID: snapshot.batch.videoID,
+            feedbackProgress = snapshot.batch.needsTranscriptIssueExtraction ? "Extracting issues from transcript" : "Suggesting issue groups and evidence links"
+            let prepared = try await withUsageRun(operation: .taskGeneration, videoID: snapshot.batch.videoID,
                 configuration: configuration, feedbackBatchID: batchID, feedbackRevision: snapshot.batch.revision) {
-                try await FeedbackPreparer(client: client, configuration: configuration, credential: credential, paths: paths)
+                if snapshot.batch.needsTranscriptIssueExtraction {
+                    let issues = try await FeedbackTranscriptExtractor(client: client, configuration: configuration, credential: credential)
+                        .extract(batch: snapshot.batch)
+                    return (issues, [FeedbackPreparationSuggestion]())
+                }
+                let suggestions = try await FeedbackPreparer(client: client, configuration: configuration, credential: credential, paths: paths)
                     .suggest(batch: snapshot.batch)
+                return (snapshot.batch.comments, suggestions)
             }
             var batch = try await store.feedbackSnapshot(id: batchID).batch
             guard batch.revision == snapshot.batch.revision else { throw TaskContextError.conflict }
-            batch.preparationSuggestions = suggestions
+            batch.comments = prepared.0
+            batch.preparationSuggestions = prepared.1
             _ = try await store.updateFeedback(batch, expectedRevision: batch.revision)
-            feedbackProgress = "\(suggestions.count) issue suggestions ready for review."
+            if snapshot.batch.needsTranscriptIssueExtraction {
+                feedbackProgress = prepared.0.isEmpty ? "No actionable issues found in the transcript. Review the saved transcript before retrying." : "\(prepared.0.count) issues extracted. Review or edit them before generating tasks."
+            } else { feedbackProgress = "\(prepared.1.count) issue suggestions ready for review." }
             await loadFeedback()
-        } catch is CancellationError { feedbackProgress = "Issue preparation cancelled; parsed issues were kept." }
-        catch { feedbackProgress = "Issue preparation failed; parsed issues were kept."; errorMessage = error.localizedDescription }
+        } catch is CancellationError { feedbackProgress = "Issue preparation cancelled; original feedback and evidence were kept." }
+        catch { feedbackProgress = "Issue preparation failed; original feedback and evidence were kept."; errorMessage = error.localizedDescription }
     }
 
     func applyFeedbackSuggestion(batchID: String, issueID: String) async {
@@ -520,6 +531,10 @@ extension AppModel {
                snapshot.batch.projectID != nil && snapshot.batch.projectID == selectedProjectID),
               let store, let paths else { return }
         guard let projectID = snapshot.batch.projectID else { errorMessage = "Assign this feedback to a project before generating tasks."; return }
+        guard !snapshot.batch.needsTranscriptIssueExtraction else {
+            errorMessage = "Extract and review issues from the transcript before generating tasks."
+            return
+        }
         guard snapshot.batch.unassignedSourceIDs.isEmpty else {
             errorMessage = "Assign every uploaded source to an issue or batch-wide context before generating tasks."
             return

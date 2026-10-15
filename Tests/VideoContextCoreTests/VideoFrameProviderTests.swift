@@ -50,4 +50,31 @@ struct VideoFrameProviderTests {
         #expect(properties[kCGImagePropertyPixelWidth] as? Int == 160)
         #expect(properties[kCGImagePropertyPixelHeight] as? Int == 90)
     }
+
+    @Test("Actual timestamp is the recording time of the returned frame")
+    func actualTimestampMatchesReturnedFrame() async throws {
+        // 10 fps: a 1.25 s request returns the next frame, at 1.3 s. The
+        // second file's container starts at 10 s; times stay recording-relative.
+        let directory = FileManager.default.temporaryDirectory.appending(path: "video-context-frame-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let videoURL = directory.appending(path: "frames.mp4")
+        let offsetURL = directory.appending(path: "offset.mp4")
+        let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+        let encoded = try await ProcessRunner().run(ProcessCommand(executable: ffmpeg, arguments: [
+            "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=160x120:d=5:r=10",
+            "-c:v", "libx264", "-g", "30", "-pix_fmt", "yuv420p", videoURL.path
+        ]))
+        #expect(encoded.status == 0)
+        let shifted = try await ProcessRunner().run(ProcessCommand(executable: ffmpeg, arguments: [
+            "-hide_banner", "-loglevel", "error", "-y", "-i", videoURL.path,
+            "-c", "copy", "-output_ts_offset", "10", offsetURL.path
+        ]))
+        #expect(shifted.status == 0)
+
+        let provider = VideoFrameProvider()
+        for (url, requested, expected) in [(videoURL, 1.25, 1.3), (videoURL, 0.0, 0.0), (offsetURL, 1.25, 1.3)] {
+            let frame = try await provider.frame(videoURL: url, timestamp: requested)
+            #expect(abs(frame.actualTimestamp - expected) < 0.001, "requested \(requested) in \(url.lastPathComponent)")
+        }
+    }
 }

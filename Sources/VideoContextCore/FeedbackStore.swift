@@ -100,7 +100,7 @@ extension VideoContextStore {
         guard
               !batch.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !batch.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !batch.comments.isEmpty else { throw TaskContextError.invalid("Enter a title and feedback text.") }
+              !batch.comments.isEmpty || !batch.transcriptSources.isEmpty else { throw TaskContextError.invalid("Enter a title and feedback text.") }
         let ids = Set(batch.sources.map(\.id))
         guard ids.count == batch.sources.count,
               Set(batch.batchWideSourceIDs).isSubset(of: ids),

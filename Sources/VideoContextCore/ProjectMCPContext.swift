@@ -506,6 +506,10 @@ private extension VideoContextStore {
         guard (1...100).contains(limit) else { throw VideoContextStoreError.invalidLimit }
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { throw VideoContextStoreError.emptyQuery }
+        // An item matches when it contains every query word, in any order.
+        // Example: "gallery AI images" matches "AI images in the gallery".
+        let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+        let phrase = words.joined(separator: " ")
         return try pool.read { db in
             let scope = try Self.mcpScope(projectID: projectID, db: db)
             let (_, workspace, documentation, revision) = try Self.mcpWorkspace(scope: scope, db: db)
@@ -514,7 +518,7 @@ private extension VideoContextStore {
                 let transcript = try Row.fetchAll(db, sql: "SELECT id,start_time,end_time,COALESCE(corrected_text,original_text) AS text FROM transcript_segments WHERE video_id=?", arguments: [video.id])
                 for row in transcript {
                     let text: String = row["text"]
-                    guard text.localizedCaseInsensitiveContains(query) else { continue }
+                    guard Self.mcpContainsEvery(words, in: text) else { continue }
                     let sourceRevision = video.revisions
                     base.append(.init(id: "transcript:\(row["id"] as String)", kind: .recording, title: video.title,
                                       summary: text, revision: "transcript:\(sourceRevision.transcript)", state: "Transcript",
@@ -523,46 +527,53 @@ private extension VideoContextStore {
                 let evidence = try Row.fetchAll(db, sql: "SELECT id,timestamp,ocr_text FROM evidence_items WHERE video_id=?", arguments: [video.id])
                 for row in evidence {
                     let text: String = row["ocr_text"]
-                    guard text.localizedCaseInsensitiveContains(query) else { continue }
+                    guard Self.mcpContainsEvery(words, in: text) else { continue }
                     base.append(.init(id: "evidence:\(row["id"] as String)", kind: .recording, title: video.title,
                                       summary: text, revision: "evidence:\(video.revisions.evidence)", state: "Screenshot",
                                       citations: [.recording(videoID: video.id, sourceRevision: video.revisions, timestamp: row["timestamp"], evidenceID: row["id"]) ]))
                 }
                 if let row = try Row.fetchOne(db, sql: "SELECT markdown FROM briefs WHERE video_id=?", arguments: [video.id]) {
                     let text: String = row["markdown"]
-                    if text.localizedCaseInsensitiveContains(query) {
+                    if Self.mcpContainsEvery(words, in: text) {
                         base.append(.init(id: "brief:\(video.id)", kind: .recording, title: video.title,
                                           summary: text.prefix(1_200).description, revision: "brief:\(video.revisions.brief)", state: "Brief", freshness: video.revisions.isBriefStale ? .stale : .current))
                     }
                 }
             }
             for batch in workspace.batches {
-                for comment in batch.comments where comment.text.localizedCaseInsensitiveContains(query) {
+                for comment in batch.comments where Self.mcpContainsEvery(words, in: comment.text) {
                     base.append(.init(id: "comment:\(comment.id)", kind: comment.kind == .request ? .request : .feedback,
                                       title: batch.title, summary: comment.text, revision: "batch:\(batch.revision)",
                                       state: comment.kind.rawValue, citations: [.feedback(batchID: batch.id, sourceRevision: batch.revision, commentID: comment.id, sourceID: nil)]))
                 }
-                for source in batch.sources where source.ocrText.localizedCaseInsensitiveContains(query) {
+                for source in batch.sources where Self.mcpContainsEvery(words, in: source.ocrText) {
                     base.append(.init(id: "feedback-source:\(source.id)", kind: .feedback, title: batch.title,
                                       summary: source.ocrText, revision: "batch:\(batch.revision)", state: source.kind.rawValue,
                                       citations: [.feedback(batchID: batch.id, sourceRevision: batch.revision, commentID: nil, sourceID: source.id)]))
                 }
             }
             for sourceRevision in documentation.sourceRevisions {
-                for unit in sourceRevision.units where unit.text.localizedCaseInsensitiveContains(query) {
+                for unit in sourceRevision.units where Self.mcpContainsEvery(words, in: unit.text) {
                     base.append(.init(id: "document-unit:\(unit.id)", kind: .documentSource, title: documentation.sources.first(where: { $0.id == sourceRevision.sourceID })?.name ?? sourceRevision.sourceID,
                                       summary: unit.text, revision: "source:\(sourceRevision.revision)", state: unit.kind.rawValue,
                                       freshness: documentation.sources.first(where: { $0.id == sourceRevision.sourceID })?.currentRevision == sourceRevision.revision ? .current : .stale,
                                       citations: [.document(sourceID: sourceRevision.sourceID, revision: sourceRevision.revision, locator: unit.locator)]))
                 }
             }
-            let hits = base.filter { Self.mcpSearchText(for: $0).contains(query.lowercased()) }
-                .map { item in
-                    MCPProjectSearchHit(id: item.id, kind: item.kind, title: item.title,
-                                        excerpt: item.summary, revision: item.revision,
-                                        freshness: item.freshness, citations: item.citations)
+            // Items that contain the whole query as a phrase come first, then
+            // the usual kind and ID order.
+            let hits = base.map { (item: $0, text: Self.mcpSearchText(for: $0)) }
+                .filter { entry in Self.mcpContainsEvery(words, in: entry.text) }
+                .sorted { lhs, rhs in
+                    let lhsRank = lhs.text.contains(phrase) ? 0 : 1
+                    let rhsRank = rhs.text.contains(phrase) ? 0 : 1
+                    return (lhsRank, lhs.item.kind.rawValue, lhs.item.id) < (rhsRank, rhs.item.kind.rawValue, rhs.item.id)
                 }
-                .sorted { ($0.kind.rawValue, $0.id) < ($1.kind.rawValue, $1.id) }
+                .map { entry in
+                    MCPProjectSearchHit(id: entry.item.id, kind: entry.item.kind, title: entry.item.title,
+                                        excerpt: entry.item.summary, revision: entry.item.revision,
+                                        freshness: entry.item.freshness, citations: entry.item.citations)
+                }
             let signature = Self.mcpStableHash(revision + ":" + query.lowercased() + ":" + hits.map(\.id).joined(separator: "|"))
             let offset = try ProjectMCPPageCursor.offset(cursor, scope: "search:\(projectID):\(query.lowercased())", revision: signature)
             guard offset <= hits.count else { throw TaskContextError.conflict }
@@ -571,6 +582,10 @@ private extension VideoContextStore {
                          hits: Array(hits[offset..<end]),
                          nextCursor: end < hits.count ? ProjectMCPPageCursor(scope: "search:\(projectID):\(query.lowercased())", revision: signature, offset: end).encoded : nil)
         }
+    }
+
+    private static func mcpContainsEvery(_ words: [String], in text: String) -> Bool {
+        words.allSatisfy { text.localizedCaseInsensitiveContains($0) }
     }
 
     private static func mcpWordCount(_ text: String) -> Int {

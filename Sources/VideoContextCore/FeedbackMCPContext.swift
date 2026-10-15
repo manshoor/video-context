@@ -4,7 +4,11 @@ public struct FeedbackContextBlock: Codable, Sendable {
     public let kind: String
     public let text: String
     public let sourceID: String?
-    public init(kind: String, text: String, sourceID: String? = nil) { self.kind = kind; self.text = text; self.sourceID = sourceID }
+    /// ID of the requirement, acceptance check, or question this block shows.
+    public let itemID: String?
+    public init(kind: String, text: String, sourceID: String? = nil, itemID: String? = nil) {
+        self.kind = kind; self.text = text; self.sourceID = sourceID; self.itemID = itemID
+    }
 }
 public struct FeedbackContextPage: Codable, Sendable {
     public let batchID: String
@@ -169,15 +173,15 @@ public struct FeedbackMCPService: Sendable {
         }
         blocks.append(.init(kind: "origin", text: value.batch.comments.first(where: { $0.id == task.issueID })?.kind.rawValue ?? "feedback"))
         for statement in task.content.requirements {
-            blocks.append(.init(kind: "requirement", text: "\(statement.origin.label): \(statement.text)"))
+            blocks.append(.init(kind: "requirement", text: "\(statement.origin.label): \(statement.text)", itemID: statement.id))
             blocks += statement.sourceIDs.map { .init(kind: "requirement_source", text: statement.id, sourceID: $0) }
         }
         for statement in task.content.checks {
-            blocks.append(.init(kind: "acceptance_check", text: statement.text))
+            blocks.append(.init(kind: "acceptance_check", text: statement.text, itemID: statement.id))
             blocks += statement.sourceIDs.map { .init(kind: "check_source", text: statement.id, sourceID: $0) }
         }
         for question in task.content.questions {
-            blocks.append(.init(kind: "question", text: "\(question.question)\nAnswer: \(question.answer)\nBlocking: \(question.unresolved)"))
+            blocks.append(.init(kind: "question", text: Self.questionText(question), itemID: question.id))
             blocks += question.sourceIDs.map { .init(kind: "question_source", text: question.id, sourceID: $0) }
         }
         blocks += task.content.allSourceIDs.sorted().map { sourceID in
@@ -290,10 +294,24 @@ public struct FeedbackMCPService: Sendable {
         )
         return .init(page: page, images: images)
     }
+    // Same state fields as recording task questions, plus the answer.
+    private static func questionText(_ question: TaskQuestion) -> String {
+        var text = "\(question.question)\nAnswer: \(question.answer)\nBlocking: \(question.isBlocking); unresolved: \(question.unresolved)"
+        if let category = question.category {
+            text += "\nCategory: \(category.rawValue)"
+        }
+        let reason = question.nonBlockingReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !reason.isEmpty {
+            text += "\nNon-blocking reason: \(reason)"
+        }
+        return text
+    }
     private static func page(_ input: [FeedbackContextBlock], batchID: String, projectID: String?, videoID: String?, batchRevision: Int,
                              task: FeedbackTask?, cursor: String?) throws -> FeedbackContextPage {
         let blocks = input.flatMap { block in
-            LocalAnalysisBatchPlanner.pieces(block.text, budget: 1500).map { FeedbackContextBlock(kind: block.kind, text: $0, sourceID: block.sourceID) }
+            LocalAnalysisBatchPlanner.pieces(block.text, budget: 1500).map {
+                FeedbackContextBlock(kind: block.kind, text: $0, sourceID: block.sourceID, itemID: block.itemID)
+            }
         }
         let signature = "feedback:\(batchID):\(batchRevision):\(task?.id ?? "batch"):\(task?.revision ?? 0)"
         let offset = try FeedbackCursor.offset(cursor, signature: signature)

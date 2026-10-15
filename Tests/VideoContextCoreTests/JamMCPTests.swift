@@ -78,7 +78,7 @@ struct JamMCPTests {
         #expect(message.contains("task_id=\"\(fixture.task.id)\""))
         #expect(message.contains("source_id"))
         #expect(message.contains("Follow every continuation cursor"))
-        #expect(message.contains("Cursor will not need Jam credentials"))
+        #expect(message.contains("The coding agent will not need Jam credentials"))
     }
 
     private func makeFixture() async throws -> JamMCPFixture {
